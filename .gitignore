@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data
+# Epoch checkpoints too large; best_model.pth via Git LFS
+outputs/checkpoints/checkpoint_epoch_*.pth
+useless
+outputs
