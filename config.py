@@ -18,8 +18,10 @@ OUTPUT_DIR     = os.path.join(BASE_DIR, 'outputs')
 CHECKPOINT_DIR = os.path.join(OUTPUT_DIR, 'checkpoints')
 RESULTS_DIR    = os.path.join(OUTPUT_DIR, 'results')
 LOGS_DIR       = os.path.join(OUTPUT_DIR, 'logs')
+GALLERY_DIR    = os.path.join(OUTPUT_DIR, 'gallery')
+GALLERY_JSON   = os.path.join(GALLERY_DIR, 'gallery.json')
 
-for _d in [OUTPUT_DIR, CHECKPOINT_DIR, RESULTS_DIR, LOGS_DIR]:
+for _d in [OUTPUT_DIR, CHECKPOINT_DIR, RESULTS_DIR, LOGS_DIR, GALLERY_DIR]:
     os.makedirs(_d, exist_ok=True)
 
 # ── Model architecture ───────────────────────────────────────────────────────
@@ -32,7 +34,8 @@ UNET_INIT_FEATURES = UNET_BASE_FEATURES   # alias kept for train.py
 # ── Patch inference ───────────────────────────────────────────────────────────
 PATCH_SIZE    = 256
 PATCH_OVERLAP = 64
-BLEND_ALPHA   = 0.85   # weight for model output; 1.0=pure model, 0.0=pure original
+BLEND_ALPHA   = 0.65   # weight for model output; 1.0=pure model, 0.0=pure original
+                        # 0.65 = natural restoration balance; 0.85 was causing over-darkening
 
 # ── Training hyper-parameters ────────────────────────────────────────────────
 BATCH_SIZE     = 8
@@ -43,12 +46,15 @@ RANDOM_SEED    = 42
 GRAD_CLIP_NORM = 1.0
 
 # ── Loss weights ──────────────────────────────────────────────────────────────
-LOSS_W_L1      = 0.45
-LOSS_W_SSIM    = 0.25
-LOSS_W_PERC    = 0.15
-LOSS_W_EDGE    = 0.15
-LOSS_W_TV      = 0.15  # Total Variation to prevent static hallucination
-LOSS_W_PHYSICS = 0.20  # Dark channel scattering to prevent magenta bleeds
+# Loss weights — tuned for NATURAL color fidelity over cinematic contrast
+# Old sum: 1.35 (over-biased to edge/structure). New sum: ~1.0 (balanced).
+LOSS_W_L1      = 0.40   # Pixel-level fidelity (primary anchor)
+LOSS_W_SSIM    = 0.25   # Structural similarity (perceptual quality)
+LOSS_W_PERC    = 0.12   # Perceptual VGG features (reduced to avoid over-sharpening)
+LOSS_W_EDGE    = 0.08   # Edge preservation (reduced — was pushing cinematic look)
+LOSS_W_TV      = 0.08   # Total Variation — smoothness, prevent static hallucination
+LOSS_W_PHYSICS = 0.12   # Dark channel prior — prevents magenta bleeds
+LOSS_W_CHROMA  = 0.08   # NEW: LAB chroma (A+B) preservation — prevents color drain/monochrome look
 
 LOSS_SCALE_FULL    = 1.0
 LOSS_SCALE_HALF    = 0.4
@@ -72,11 +78,51 @@ PIN_MEMORY  = torch.cuda.is_available()
 NUM_VISUALIZATION_SAMPLES = 5
 SAVE_ALL_PREDICTIONS      = False
 
-# ── Detection ─────────────────────────────────────────────────────────────────
-YOLO_WEIGHTS     = 'yolov8s-world.pt'
-YOLO_CONF_THRESH = 0.08
-YOLO_IOU_THRESH  = 0.30
+# ── Detection (max-quality profile) ──────────────────────────────────────────
+# High-capacity model + larger inference size + TTA/multi-scale.
+def _pick_trained_yolo_weights() -> str:
+    """
+    Prefer Step 7 training outputs when available (best > last), else fallback.
+
+    We check a few common locations because training/output cwd can vary and
+    users may copy weights in manually.
+    """
+    candidates = [
+        # Expected Ultralytics output from Step 7
+        os.path.join(BASE_DIR, "runs", "marine", "v1", "weights", "best.pt"),
+        os.path.join(BASE_DIR, "runs", "marine", "v1", "weights", "last.pt"),
+        # If user copied only the file into runs/
+        os.path.join(BASE_DIR, "runs", "best.pt"),
+        os.path.join(BASE_DIR, "runs", "last.pt"),
+        # Fallback
+        "yolov8l-worldv2.pt",
+    ]
+    for p in candidates:
+        if p.endswith(".pt") and os.path.isabs(p) and os.path.exists(p):
+            return p
+        if not os.path.isabs(p):
+            return p  # fallback model name
+    return "yolov8l-worldv2.pt"
+
+
+YOLO_WEIGHTS = _pick_trained_yolo_weights()
+_USING_TRAINED_WEIGHTS = isinstance(YOLO_WEIGHTS, str) and (os.path.isabs(YOLO_WEIGHTS) and os.path.exists(YOLO_WEIGHTS))
+# Early epochs produce low-confidence boxes; use a softer threshold while training checkpoints are used.
+YOLO_CONF_THRESH = 0.08 if _USING_TRAINED_WEIGHTS else 0.12
+YOLO_IOU_THRESH  = 0.45
 YOLO_IMG_SIZE    = 1280
+YOLO_TTA         = False
+YOLO_MULTI_SCALE = False
+
+# ── Diver detection (pretrained, COCO person → Diver) ─────────────────────────
+# Your custom-trained marine model does not include a "diver" class. To keep
+# diver detection (as the project had before the pipeline), we run a small
+# pretrained model alongside the marine model and merge results.
+ENABLE_DIVER_DETECTOR = True
+DIVER_WEIGHTS         = "yolov8s.pt"
+DIVER_CONF_THRESH     = 0.25
+DIVER_IOU_THRESH      = 0.45
+DIVER_IMG_SIZE        = 1280
 
 # ── Depth estimation ─────────────────────────────────────────────────────────
 MIDAS_MODEL_TYPE = "MiDaS_small"

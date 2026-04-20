@@ -6,7 +6,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-const BASE = '';  // Same-origin Flask server.  Change to 'http://localhost:5500' if needed.
+const BASE = '';  // Same-origin Flask server.
 
 function fd(file) {
   const f = new FormData();
@@ -14,9 +14,14 @@ function fd(file) {
   return f;
 }
 
+async function dataUrlToFile(dataUrl, filename = 'enhanced.png') {
+  const res = await fetch(dataUrl);
+  const blob = await res.blob();
+  return new File([blob], filename, { type: blob.type || 'image/png' });
+}
+
 /**
  * GET /api/status
- * @returns {Promise<{model_loaded, device, parameters, modules}>}
  */
 export async function fetchStatus() {
   const r = await fetch(`${BASE}/api/status`);
@@ -25,8 +30,8 @@ export async function fetchStatus() {
 
 /**
  * POST /api/enhance
- * @param {File} file
- * @returns {Promise<{success, enhanced_image, psnr, ssim, uiqm, uciqe, eps, size, processing_time, heatmap}>}
+ * Returns {success, enhanced_image_hybrid, enhanced_image_opencv, psnr, ssim,
+ *          uiqm, uciqe, eps, size, processing_time, heatmap}
  */
 export async function enhance(file) {
   const r = await fetch(`${BASE}/api/enhance`, { method: 'POST', body: fd(file) });
@@ -35,18 +40,19 @@ export async function enhance(file) {
 
 /**
  * POST /api/detect
- * @param {File} file
- * @returns {Promise<{success, detections, annotated_image, threat_score, alert_level, recommendations}>}
+ * @param {File} inferenceFile  Image used for YOLO inference (enhanced = better accuracy)
+ * @param {File} [originalFile] Raw upload — boxes are drawn onto this for UI honesty
  */
-export async function detect(file) {
-  const r = await fetch(`${BASE}/api/detect`, { method: 'POST', body: fd(file) });
+export async function detect(inferenceFile, originalFile) {
+  const f = new FormData();
+  f.append('image', inferenceFile);
+  if (originalFile) f.append('original', originalFile);
+  const r = await fetch(`${BASE}/api/detect`, { method: 'POST', body: f });
   return r.json();
 }
 
 /**
  * POST /api/depth
- * @param {File} file
- * @returns {Promise<{success, depth_map, average_depth, depth_range, object_distances}>}
  */
 export async function depth(file) {
   const r = await fetch(`${BASE}/api/depth`, { method: 'POST', body: fd(file) });
@@ -55,8 +61,6 @@ export async function depth(file) {
 
 /**
  * POST /api/analyze-water
- * @param {File} file
- * @returns {Promise<{success, visibility_range_meters, turbidity_level, turbidity_index, water_type, attenuation}>}
  */
 export async function analyzeWater(file) {
   const r = await fetch(`${BASE}/api/analyze-water`, { method: 'POST', body: fd(file) });
@@ -65,8 +69,6 @@ export async function analyzeWater(file) {
 
 /**
  * POST /api/process-video
- * @param {File} file
- * @returns {Promise<{status, output_path, frame_count, fps, resolution, processing_time_s}>}
  */
 export async function processVideo(file) {
   const f = new FormData();
@@ -75,37 +77,72 @@ export async function processVideo(file) {
   return r.json();
 }
 
+// ── Gallery persistence ───────────────────────────────────────────────────────
+
 /**
- * Run all four analysis APIs in parallel.
- * Each settles independently — use onEnhance / onDetect / onDepth / onWater callbacks
- * so the UI can update progressively without waiting for all four.
+ * GET /api/gallery
+ */
+export async function fetchGallery() {
+  const r = await fetch(`${BASE}/api/gallery`);
+  return r.json();
+}
+
+/**
+ * POST /api/gallery/save
+ */
+export async function saveToGalleryAPI(enhanced_b64, originalName, metrics = {}) {
+  const r = await fetch(`${BASE}/api/gallery/save`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enhanced_b64, filename: originalName, ...metrics }),
+  });
+  return r.json();
+}
+
+/**
+ * DELETE /api/gallery/clear
+ */
+export async function clearGalleryAPI() {
+  const r = await fetch(`${BASE}/api/gallery/clear`, { method: 'DELETE' });
+  return r.json();
+}
+
+/**
+ * Run all four analysis APIs.
+ * Enhancement runs first, then detect/depth/water fire in parallel immediately
+ * using the original file (no blob conversion delay).
  *
- * @param {File}     file
- * @param {Object}   callbacks  { onEnhance, onDetect, onDepth, onWater, onError }
+ * @param {File}   file       The original uploaded file
+ * @param {Object} callbacks  { onEnhance, onDetect, onDepth, onWater, onError }
  */
 export async function analyzeAll(file, { onEnhance, onDetect, onDepth, onWater, onError } = {}) {
   try {
     const wrap = (promise, cb) =>
       promise.then(data => cb && cb(data)).catch(err => onError && onError(err));
 
-    // 1. Run enhancement FIRST
+    // 1. Enhancement FIRST
     const enhanceData = await enhance(file);
-    if (onEnhance) onEnhance(enhanceData);
+    try { if (onEnhance) onEnhance(enhanceData); } catch (e) { console.warn('[ui] onEnhance render error', e); }
 
-    let targetFile = file;
 
-    // 2. If enhancement succeeded, grab the enhanced image string and convert it to a File blob
-    if (enhanceData && enhanceData.success && enhanceData.enhanced_image_hybrid) {
-      const res = await fetch(enhanceData.enhanced_image_hybrid);
-      const blob = await res.blob();
-      targetFile = new File([blob], "enhanced.png", { type: "image/png" });
+    // 2. Run detection on enhanced output (better underwater recall) while
+    //    keeping annotations on original upload for visual truthfulness.
+    let inferenceFile = file;
+    if (enhanceData?.enhanced_image_hybrid) {
+      try {
+        inferenceFile = await dataUrlToFile(
+          enhanceData.enhanced_image_hybrid,
+          `enhanced_${file.name || 'input'}.png`
+        );
+      } catch (e) {
+        console.warn('[api] enhanced image conversion failed, fallback to original', e);
+      }
     }
 
-    // 3. Run all subsequent processing on the new Target File (Original or Enhanced Hybrid)
     await Promise.all([
-      wrap(detect(targetFile),       onDetect),
-      wrap(depth(targetFile),        onDepth),
-      wrap(analyzeWater(targetFile), onWater)
+      wrap(detect(inferenceFile, file), onDetect),
+      wrap(depth(file),        onDepth),
+      wrap(analyzeWater(file), onWater),
     ]);
   } catch (err) {
     if (onError) onError(err);

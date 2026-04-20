@@ -5,3 +5,21 @@ data
 outputs/checkpoints/checkpoint_epoch_*.pth
 useless
 outputs
+
+# ── Ultralytics / YOLO artifacts ─────────────────────────────────────────────
+# Training runs (weights, plots, results)
+runs/
+
+# Model weights (YOLO .pt files are large; keep them out of git)
+*.pt
+
+# Ultralytics caches / outputs
+*.engine
+*.onnx
+*.torchscript
+*.tflite
+*.mlpackage
+
+# Dataset caches created by Ultralytics
+**/*.cache
+*.pt

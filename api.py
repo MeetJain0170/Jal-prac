@@ -1,23 +1,12 @@
-"""
-api.py — JalDrishti Maritime Security Vision System  (Flask backend)
-=====================================================================
-
-Endpoints
----------
-  POST /api/enhance        — U-Net image enhancement + quality metrics
-  POST /api/detect         — YOLO maritime object detection
-  POST /api/depth          — MiDaS monocular depth estimation
-  POST /api/analyze-water  — Water turbidity / visibility analysis
-  POST /api/process-video  — Video enhancement + detection pipeline
-  GET  /api/status         — Model / system health check
-"""
-
 from __future__ import annotations
 
 import io
 import os
+import json
 import base64
 import time
+import uuid
+import logging
 
 import numpy as np
 from PIL import Image
@@ -30,128 +19,184 @@ from train.model import UNet, count_parameters
 from enhance import enhance_image, enhance_opencv, calculate_metrics_full
 from model_loader import load_model as _shared_load_model
 
-# ── Analysis modules ─────────────────────────────────────────────────────────
-from analysis.water_quality  import analyze_water_quality
+from analysis.water_quality import analyze_water_quality
 from analysis.threat_analysis import compute_threat_score
-from analysis.heatmap        import heatmap_to_base64, enhancement_stats
-from analysis.image_quality  import compute_all_metrics
 
-# ── Detection & depth (lazy imports inside routes to avoid hard crash) ────────
+# ------------------------------------------------------------------------------
+# CONFIG + LOGGING
+# ------------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("JalAPI")
 
+torch.set_num_threads(1)
 
-app  = Flask(__name__, static_folder="static")
+app = Flask(__name__, static_folder="static")
 CORS(app)
 
-_MODEL:    UNet | None = None
+_MODEL: UNet | None = None
 _DETECTOR = None
-_DEPTH     = None
+_DEPTH_MODEL = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Loaders
-# ─────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# LOADERS
+# ------------------------------------------------------------------------------
 
-def _load_model() -> UNet | None:
+def _load_model():
     global _MODEL
     if _MODEL is not None:
         return _MODEL
-    m = _shared_load_model()
-    _MODEL = m
-    return _MODEL
+
+    try:
+        model = _shared_load_model()
+        if model:
+            model.to(config.DEVICE)
+            model.eval()
+        _MODEL = model
+        return model
+    except Exception as e:
+        logger.error(f"Model load failed: {e}")
+        return None
 
 
 def _load_detector():
     global _DETECTOR
     if _DETECTOR is not None:
         return _DETECTOR
+
     try:
-        from detection.yolo_detector import get_detector
-        _DETECTOR = get_detector(
-            weights     = config.YOLO_WEIGHTS,
-            conf_thresh = config.YOLO_CONF_THRESH,
-            iou_thresh  = config.YOLO_IOU_THRESH,
-            img_size    = config.YOLO_IMG_SIZE,
-        )
+        if getattr(config, "ENABLE_DIVER_DETECTOR", False):
+            from detection.hybrid_detector import get_detector
+            _DETECTOR = get_detector(
+                marine_weights=config.YOLO_WEIGHTS,
+                marine_conf=config.YOLO_CONF_THRESH,
+                marine_iou=config.YOLO_IOU_THRESH,
+                marine_imgsz=config.YOLO_IMG_SIZE,
+                diver_weights=getattr(config, "DIVER_WEIGHTS", "yolov8s.pt"),
+                diver_conf=getattr(config, "DIVER_CONF_THRESH", 0.25),
+                diver_iou=getattr(config, "DIVER_IOU_THRESH", 0.45),
+                diver_imgsz=getattr(config, "DIVER_IMG_SIZE", config.YOLO_IMG_SIZE),
+            )
+        else:
+            from detection.simple_detector import get_detector
+            _DETECTOR = get_detector(
+                weights=config.YOLO_WEIGHTS,
+                conf_thresh=config.YOLO_CONF_THRESH,
+                iou_thresh=config.YOLO_IOU_THRESH,
+                img_size=config.YOLO_IMG_SIZE,
+                tta=getattr(config, "YOLO_TTA", False),
+                multi_scale=getattr(config, "YOLO_MULTI_SCALE", True),
+            )
         return _DETECTOR
-    except Exception as exc:
-        print(f"[api] detector load error: {exc}")
+    except Exception as e:
+        logger.warning(f"YOLO load failed: {e}")
         return None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+def _load_depth():
+    """Warm up the MiDaS depth model (lazy — loads on first real call)."""
+    global _DEPTH_MODEL
+    if _DEPTH_MODEL is not None:
+        return _DEPTH_MODEL
 
-def _read_image(file_storage) -> Image.Image:
-    return Image.open(io.BytesIO(file_storage.read())).convert("RGB")
+    try:
+        # depth_estimator uses an internal _load_model() so we trigger it via
+        # a tiny dummy call on the module level rather than importing load_midas
+        # (which never existed as a public symbol).
+        from depth import depth_estimator as _de
+        _DEPTH_MODEL = _de._load_model()  # returns (model, transform) tuple
+        return _DEPTH_MODEL
+    except Exception as e:
+        logger.warning(f"Depth preload skipped (will load on first request): {e}")
+        return None
 
 
-def _pil_to_b64(img: Image.Image) -> str:
+# ------------------------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------------------------
+
+def _read_image(file):
+    img = Image.open(io.BytesIO(file.read())).convert("RGB")
+    return img
+
+
+def _pil_to_b64(img):
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Routes
-# ─────────────────────────────────────────────────────────────────────────────
+def enhancement_stats(orig, enhanced):
+    diff = np.abs(orig.astype(np.float32) - enhanced.astype(np.float32))
+    return {
+        "mean_enhancement": float(np.mean(diff)),
+        "enhanced_pct": float(np.mean(diff > 10) * 100),
+    }
+
+
+# ------------------------------------------------------------------------------
+# ROUTES
+# ------------------------------------------------------------------------------
 
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
 
 
-# ── /api/enhance ──────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# ENHANCE
+# ------------------------------------------------------------------------------
 
 @app.route("/api/enhance", methods=["POST"])
 def enhance():
-    model = _load_model()
-    if model is None:
-        return jsonify({"error": "No trained model. Run: python train.py"}), 400
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
 
+    model = _load_model()
+    if model is None:
+        return jsonify({"error": "Model not loaded"}), 500
+
     try:
-        t0  = time.perf_counter()
+        t0 = time.perf_counter()
+
         img = _read_image(request.files["image"])
         orig_np = np.array(img)
-        w, h    = img.size
 
-        # Dual Processing Path
-        enhanced_img_hybrid = enhance_image(model, img, use_hybrid=True)
-        enhanced_img_opencv = enhance_opencv(img)
-        
-        enh_np = np.array(enhanced_img_hybrid)
+        fast_mode = request.form.get("fast", "false").lower() == "true"
+
+        enhanced_hybrid = enhance_image(model, img, use_hybrid=not fast_mode)
+        enhanced_op = enhance_opencv(img)
+
+        enh_np = np.array(enhanced_hybrid)
         elapsed = round(time.perf_counter() - t0, 3)
 
-        metrics  = calculate_metrics_full(img, enhanced_img_hybrid)
-        heatmap  = heatmap_to_base64(orig_np, enh_np)
-        enh_stats = enhancement_stats(orig_np, enh_np)
+        metrics = calculate_metrics_full(img, enhanced_hybrid)
+        stats = enhancement_stats(orig_np, enh_np)
+
+        w, h = img.size  # PIL size is (width, height)
 
         return jsonify({
-            "success":          True,
-            "enhanced_image_hybrid": _pil_to_b64(enhanced_img_hybrid),
-            "enhanced_image_opencv": _pil_to_b64(enhanced_img_opencv),
-            "heatmap":          heatmap,
-            "size":             f"{w}x{h}",
-            "device":           "GPU" if config.DEVICE.type == "cuda" else "CPU",
-            "processing_time":  elapsed,
-            # Metrics (Calculated against Hybrid)
-            "psnr":   metrics["psnr"],
-            "ssim":   metrics["ssim"],
-            "eps":    metrics["eps"],
-            "uiqm":   metrics["uiqm"],
-            "uciqe":  metrics["uciqe"],
-            # Enhancement stats
-            "mean_enhancement": enh_stats["mean_enhancement"],
-            "enhanced_pct":     enh_stats["enhanced_pct"],
+            "success": True,
+            "enhanced_image_hybrid": _pil_to_b64(enhanced_hybrid),
+            "enhanced_image_opencv": _pil_to_b64(enhanced_op),
+            "processing_time": elapsed,
+            "size": f"{w}×{h}",
+            "psnr":  metrics["psnr"],
+            "ssim":  metrics["ssim"],
+            "uiqm":  metrics["uiqm"],
+            "uciqe": metrics["uciqe"],
+            "eps":   metrics["eps"],
+            **stats
         })
 
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+    except Exception as e:
+        logger.error(f"Enhance failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
-# ── /api/detect ───────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# DETECT
+# ------------------------------------------------------------------------------
 
 @app.route("/api/detect", methods=["POST"])
 def detect():
@@ -159,47 +204,76 @@ def detect():
         return jsonify({"error": "No image uploaded"}), 400
 
     try:
-        img    = _read_image(request.files["image"])
-        img_np = np.array(img)
+        # `image` is the inference image (can be enhanced).
+        # Optional `original` is used only for drawing UI annotations.
+        infer_img = _read_image(request.files["image"])
+        infer_np = np.array(infer_img)
 
-        # Try YOLO — report gracefully if unavailable
+        original_np = None
+        if "original" in request.files:
+            try:
+                original_np = np.array(_read_image(request.files["original"]))
+            except Exception:
+                original_np = None
+
+        if request.form.get("enhance_first", "false") == "true":
+            model = _load_model()
+            if model:
+                infer_img = enhance_image(model, infer_img, use_hybrid=False)
+                infer_np = np.array(infer_img)
+
         detector = _load_detector()
         if detector is None:
-            return jsonify({
-                "success":    False,
-                "error":      "YOLO not available. Run: pip install ultralytics",
-                "detections": [],
-            }), 200
+            return jsonify({"error": "YOLO unavailable"}), 200
 
-        t0 = time.perf_counter()
-        detections, annotated_b64 = detector.detect_and_annotate(img_np)
-        elapsed = round(time.perf_counter() - t0, 3)
+        try:
+            detections, annotated = detector.detect_and_annotate(
+                infer_np,
+                original_img=original_np
+            )
+        except Exception as det_err:
+            logger.warning(f"Primary detector failed, trying fallback model: {det_err}")
+            from detection.yolo_detector import get_detector
+            fallback = get_detector(
+                weights="yolov8s-worldv2.pt",
+                conf_thresh=max(0.08, config.YOLO_CONF_THRESH),
+                iou_thresh=config.YOLO_IOU_THRESH,
+                img_size=min(1280, config.YOLO_IMG_SIZE),
+                tta=False,
+                multi_scale=True,
+            )
+            detections, annotated = fallback.detect_and_annotate(
+                infer_np,
+                original_img=original_np
+            )
 
-        # Water context for threat scoring
-        water = analyze_water_quality(img_np)
+        water = analyze_water_quality(infer_np)
         threat = compute_threat_score(
             detections,
-            turbidity_index=water.get("turbidity_index", 0.0),
-            img_w=img_np.shape[1],
-            img_h=img_np.shape[0],
+            turbidity_index=water.get("turbidity_index", 0),
+            img_w=infer_np.shape[1],
+            img_h=infer_np.shape[0],
         )
 
         return jsonify({
-            "success":          True,
-            "detections":       detections,
-            "detection_count":  len(detections),
-            "annotated_image":  annotated_b64,
-            "threat_score":     threat["threat_score"],
-            "alert_level":      threat["alert_level"],
-            "recommendations":  threat["recommendations"],
-            "processing_time":  elapsed,
+            "success": True,
+            "detections": detections,
+            "annotated_image": annotated,
+            "threat_score": threat["threat_score"],
+            "alert_level": threat["alert_level"],
+            "recommendations": threat.get("recommendations", []),
+            "security_objects": threat.get("security_objects", 0),
+            "threat_breakdown": threat.get("breakdown", {}),
         })
 
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+    except Exception as e:
+        logger.error(f"Detection failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
-# ── /api/depth ────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# DEPTH
+# ------------------------------------------------------------------------------
 
 @app.route("/api/depth", methods=["POST"])
 def depth():
@@ -207,22 +281,51 @@ def depth():
         return jsonify({"error": "No image uploaded"}), 400
 
     try:
-        img    = _read_image(request.files["image"])
+        img = _read_image(request.files["image"])
         img_np = np.array(img)
 
-        from depth.depth_estimator import estimate_depth
-        t0     = time.perf_counter()
-        result = estimate_depth(img_np)
+        t0 = time.perf_counter()
+
+        try:
+            # PRIMARY (your original working method)
+            from depth.depth_estimator import estimate_depth
+            result = estimate_depth(img_np)
+
+        except Exception as e:
+            print(f"[depth] primary failed: {e}")
+
+            try:
+                # FALLBACK (tensor-based)
+                from depth.depth_estimator import estimate_depth_tensor
+
+                depth_map = estimate_depth_tensor(img_np)
+
+                result = {
+                    "status": "ok",
+                    "depth_map": depth_map.tolist() if hasattr(depth_map, "tolist") else None
+                }
+
+            except Exception as e2:
+                print(f"[depth] fallback failed: {e2}")
+                return jsonify({
+                    "error": "Depth estimation failed completely",
+                    "details": str(e2)
+                }), 500
+
         elapsed = round(time.perf_counter() - t0, 3)
+
         result["processing_time"] = elapsed
-        result["success"] = result["status"] == "ok"
+        result["success"] = result.get("status", "ok") == "ok"
+
         return jsonify(result)
 
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-# ── /api/analyze-water ────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# WATER ANALYSIS
+# ------------------------------------------------------------------------------
 
 @app.route("/api/analyze-water", methods=["POST"])
 def analyze_water():
@@ -230,136 +333,106 @@ def analyze_water():
         return jsonify({"error": "No image uploaded"}), 400
 
     try:
-        img    = _read_image(request.files["image"])
+        img = _read_image(request.files["image"])
         img_np = np.array(img)
 
-        t0      = time.perf_counter()
-        wq      = analyze_water_quality(img_np)
+        t0 = time.perf_counter()
+        wq = analyze_water_quality(img_np)
         elapsed = round(time.perf_counter() - t0, 3)
 
         return jsonify({
-            "success":                 True,
-            "visibility_range_meters": wq["visibility_range_meters"],
-            "turbidity_level":         wq["turbidity_level"],
-            "turbidity_index":         wq["turbidity_index"],
-            "contrast_loss":           wq["contrast_loss"],
-            "attenuation":             wq["attenuation"],
-            "water_type":              wq["water_type"],
-            "processing_time":         elapsed,
+            "success": True,
+            **wq,
+            "processing_time": elapsed,
         })
 
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-# ── /api/process-video ────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# GALLERY
+# ------------------------------------------------------------------------------
 
-@app.route("/api/process-video", methods=["POST"])
-def process_video():
-    if "video" not in request.files:
-        return jsonify({"error": "No video file uploaded"}), 400
-
-    model = _load_model()
-    if model is None:
-        return jsonify({"error": "No trained model. Run: python train.py"}), 400
-
+@app.route("/api/gallery")
+def gallery_list():
     try:
-        from video.video_processor import process_video as _proc_vid
-        from enhance import enhance_with_patches
-        from PIL import Image as PILImage
-
-        video_bytes = request.files["video"].read()
-        run_det     = request.form.get("run_detection", "false").lower() == "true"
-        detector    = _load_detector() if run_det else None
-
-        def _enhance_frame(frame_np: np.ndarray) -> np.ndarray:
-            pil = PILImage.fromarray(frame_np)
-            out = enhance_with_patches(model, pil, patch_size=config.PATCH_SIZE,
-                                        overlap=config.PATCH_OVERLAP)
-            return np.array(out)
-
-        result = _proc_vid(
-            video_bytes  = video_bytes,
-            enhance_fn   = _enhance_frame,
-            output_dir   = config.VIDEO_OUTPUT_DIR,
-            max_frames   = config.VIDEO_MAX_FRAMES,
-            run_detection= run_det,
-            detector     = detector,
-        )
-
-        if result["status"] != "ok":
-            return jsonify({"error": result.get("error", "Processing failed")}), 500
-
-        # Return download path (relative to server)
-        rel_path = os.path.relpath(result["output_path"], start=config.BASE_DIR)
-        return jsonify({
-            "success":            True,
-            "output_path":        rel_path,
-            "frame_count":        result["frame_count"],
-            "fps":                result["fps"],
-            "resolution":         result["resolution"],
-            "processing_time_s":  result["processing_time_s"],
-        })
-
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        if os.path.exists(config.GALLERY_JSON):
+            with open(config.GALLERY_JSON, "r") as f:
+                entries = json.load(f)
+        else:
+            entries = []
+        return jsonify({"success": True, "entries": entries})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-# ── /api/status ───────────────────────────────────────────────────────────────
+@app.route("/api/gallery/save", methods=["POST"])
+def gallery_save():
+    try:
+        data = request.get_json(force=True)
+        entry = {
+            "enhanced_b64": data.get("enhanced_b64", ""),
+            "filename":     data.get("filename", "image"),
+            "saved_at":     time.strftime("%H:%M:%S"),
+            "psnr":         data.get("psnr"),
+            "ssim":         data.get("ssim"),
+            "uiqm":         data.get("uiqm"),
+            "uciqe":        data.get("uciqe"),
+            "processing_time": data.get("processing_time"),
+        }
+        entries = []
+        if os.path.exists(config.GALLERY_JSON):
+            with open(config.GALLERY_JSON, "r") as f:
+                entries = json.load(f)
+        entries.insert(0, entry)          # newest first
+        entries = entries[:100]           # cap at 100
+        with open(config.GALLERY_JSON, "w") as f:
+            json.dump(entries, f)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/gallery/clear", methods=["DELETE"])
+def gallery_clear():
+    try:
+        if os.path.exists(config.GALLERY_JSON):
+            os.remove(config.GALLERY_JSON)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ------------------------------------------------------------------------------
+# STATUS
+# ------------------------------------------------------------------------------
 
 @app.route("/api/status")
 def status():
     model = _load_model()
-    params = count_parameters(model) if model else None
-
-    # Check which optional modules are available
-    yolo_ok  = False
-    midas_ok = False
-    cv2_ok   = False
-
-    try:
-        import ultralytics; yolo_ok = True
-    except ImportError:
-        pass
-    try:
-        torch.hub.list("intel-isl/MiDaS", trust_repo=True); midas_ok = True
-    except Exception:
-        pass
-    try:
-        import cv2; cv2_ok = True
-    except ImportError:
-        pass
+    yolo_ok = _load_detector() is not None
+    midas_ok = _load_depth() is not None
 
     return jsonify({
-        "model_loaded":  model is not None,
-        "device":        str(config.DEVICE),
-        "parameters":    params,
+        "model_loaded": model is not None,
+        "device": str(config.DEVICE),
+        "parameters": count_parameters(model) if model else None,
         "modules": {
-            "yolo":      yolo_ok,
-            "midas":     midas_ok,
-            "opencv":    cv2_ok,
+            "yolo": yolo_ok,
+            "midas": midas_ok,
+            "opencv": True,
         },
     })
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------------------
+# ENTRY
+# ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("\n" + "=" * 65)
-    print("  JalDrishti - Maritime Security Vision System")
-    print("=" * 65)
-    _MODEL = _load_model()
-    if _MODEL:
-        print(f"  Enhancement model loaded  -> {config.DEVICE}")
-        print(f"  Parameters: {count_parameters(_MODEL):,}")
-    else:
-        print("  WARNING: No model found - train first: python train.py")
-    print(f"\n  Server: http://localhost:5500")
-    print("  Endpoints:")
-    for ep in ["/api/enhance", "/api/detect", "/api/depth",
-               "/api/analyze-water", "/api/process-video", "/api/status"]:
-        print(f"    {ep}")
-    print("\n  Press Ctrl+C to stop\n")
+    print("\nJalDrishti FULL API Running...\n")
+    _load_model()        # Pre-load U-Net enhancement model
+    # Depth model loads lazily on first /api/depth request
     app.run(host="0.0.0.0", port=5500, debug=False, threaded=True)
+

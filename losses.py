@@ -118,10 +118,55 @@ class PhysicsDCPLoss(nn.Module):
     def forward(self, pred, target):
         return F.l1_loss(self.dark_channel(pred), self.dark_channel(target))
 
+
+class ChromaPreservationLoss(nn.Module):
+    """
+    Enforces color channel fidelity in LAB colorspace.
+    Prevents the network from learning to drain chroma (which causes the
+    monochrome / grayscale 'cinematic overdark' failure mode seen in inference).
+    Operates on the A and B channels (color axes) while ignoring L (luminance).
+    """
+    def __init__(self):
+        super().__init__()
+        # LAB conversion constants (sRGB D65)
+        self.register_buffer("rgb_to_xyz", torch.tensor([
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041]
+        ], dtype=torch.float32))
+
+    def _rgb_to_lab_approx(self, x):
+        """Fast approximate RGB -> LAB via XYZ intermediate. Input in [0,1]."""
+        # Approximate gamma linearization
+        x = torch.where(x > 0.04045, ((x + 0.055) / 1.055) ** 2.4, x / 12.92)
+        # XYZ
+        r = self.rgb_to_xyz.to(x.device)
+        b, c, h, w = x.shape
+        x_flat = x.view(b, 3, -1)                        # (B, 3, HW)
+        xyz = torch.einsum('ij,bjk->bik', r, x_flat)     # (B, 3, HW)
+        xyz = xyz.view(b, 3, h, w)
+        # Normalize by D65 white point
+        xyz[:, 0] /= 0.95047
+        xyz[:, 2] /= 1.08883
+        # f(t) function
+        delta = 6.0 / 29.0
+        f = torch.where(xyz > delta**3,
+                        xyz.clamp(min=1e-8) ** (1/3),
+                        xyz / (3 * delta**2) + 4/29)
+        L = 116 * f[:, 1] - 16
+        A = 500 * (f[:, 0] - f[:, 1])
+        B = 200 * (f[:, 1] - f[:, 2])
+        return A, B
+
+    def forward(self, pred, target):
+        pred_a, pred_b = self._rgb_to_lab_approx(pred)
+        tgt_a, tgt_b = self._rgb_to_lab_approx(target)
+        return F.l1_loss(pred_a, tgt_a) + F.l1_loss(pred_b, tgt_b)
+
 class SecurityLoss(nn.Module):
     """
     The True Physics-Informed Master Loss Function (PINN).
-    Calculates: L1 + SSIM + Perceptual + Edge + TV + Physics
+    Calculates: L1 + SSIM + Perceptual + Edge + TV + Physics + Chroma
     """
     def __init__(self):
         super().__init__()
@@ -131,14 +176,16 @@ class SecurityLoss(nn.Module):
         self.edge = SobelEdgeLoss()
         self.tv = TotalVariationLoss()
         self.physics = PhysicsDCPLoss()
+        self.chroma = ChromaPreservationLoss()  # NEW: prevents color drain
         
         self.weights = {
             'l1': config.LOSS_W_L1,
             'ssim': config.LOSS_W_SSIM,
             'perceptual': config.LOSS_W_PERC,
             'edge': config.LOSS_W_EDGE,
-            'tv': getattr(config, 'LOSS_W_TV', 0.15),  # New mathematical constraint
-            'physics': getattr(config, 'LOSS_W_PHYSICS', 0.20),  # New physical constraint
+            'tv': getattr(config, 'LOSS_W_TV', 0.08),
+            'physics': getattr(config, 'LOSS_W_PHYSICS', 0.12),
+            'chroma': getattr(config, 'LOSS_W_CHROMA', 0.08),  # NEW
             'multiscale': [config.LOSS_SCALE_FULL, config.LOSS_SCALE_HALF, config.LOSS_SCALE_QUARTER]
         }
 
@@ -149,13 +196,15 @@ class SecurityLoss(nn.Module):
         l_edge = self.edge(pred, target)
         l_tv = self.tv(pred)
         l_phys = self.physics(pred, target)
+        l_chroma = self.chroma(pred, target)  # NEW
         
         total = (self.weights['l1'] * l_l1 +
                  self.weights['ssim'] * l_ssim +
                  self.weights['perceptual'] * l_perc +
                  self.weights['edge'] * l_edge +
                  self.weights['tv'] * l_tv +
-                 self.weights['physics'] * l_phys)
+                 self.weights['physics'] * l_phys +
+                 self.weights['chroma'] * l_chroma)  # NEW
         
         return total
 

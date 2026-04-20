@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+"""
+JalDrishti v2 — Adaptive Underwater Enhancement Pipeline
+
+Key upgrades over v1:
+- Scene-aware preprocessing (prevents double enhancement)
+- Safer white balance (no red explosion)
+- Depth-aware contrast (bounded + stable)
+- Modular pipeline stages
+- Optional adaptive blending mask
+- Robust fallbacks
+- Logging-ready structure
+"""
+
 import numpy as np
 from PIL import Image
 import torch
 import torchvision.transforms as transforms
 import cv2
+import logging
 
 import config
 from analysis.image_quality import compute_all_metrics
@@ -12,130 +26,257 @@ from depth.depth_estimator import estimate_depth_tensor
 
 _to_tensor = transforms.ToTensor()
 
+# ------------------------------------------------------------------------------
+# LOGGING SETUP
+# ------------------------------------------------------------------------------
+logger = logging.getLogger("JalDrishti")
+logger.setLevel(logging.INFO)
 
-def apply_clahe_lab(img_np, clip_limit=2.0, tile_grid_size=(8, 8)):
-    """Apply CLAHE to the L channel of LAB colorspace for HDR-style local contrast enhancement."""
-    lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
-    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-    return cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+# ------------------------------------------------------------------------------
+# CONFIG DEFAULTS (SAFE LIMITS)
+# ------------------------------------------------------------------------------
 
+CLAHE_CLIP = 1.0
+MAX_SATURATION = 0.8
+SHARPEN_AMOUNT = 0.3
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PURE OPENCV MULTI-STAGE ENHANCEMENT (PHYSICS/OPTICS BASED)
-# ─────────────────────────────────────────────────────────────────────────────
+DEPTH_ALPHA_BASE = 1.02
+DEPTH_BETA_BASE = 6
+DEPTH_ALPHA_SCALE = 0.05
+DEPTH_BETA_SCALE = 8
 
-A_SHIFT = 0
-B_SHIFT = 0
-RED_STRENGTH = 30
-CLAHE_CLIP = 1.2
-OMEGA = 0.75
-T_MIN = 0.35
+# ------------------------------------------------------------------------------
+# SCENE CLASSIFIER (CRUCIAL FIX)
+# ------------------------------------------------------------------------------
 
-def white_balance(img):
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+def classify_scene(img_rgb_np):
+    """
+    Heuristic scene classifier:
+    Detects hazy/deep vs normal scenes.
+
+    Why:
+    Prevents double enhancement (biggest flaw earlier).
+    """
+    img = img_rgb_np.astype(np.float32) / 255.0
+
+    brightness = np.mean(img)
+    contrast = np.std(img)
+
+    # underwater haze signature
+    blue_dominance = np.mean(img[:, :, 2]) > np.mean(img[:, :, 0]) * 1.2
+
+    if contrast < 0.12 or blue_dominance:
+        return "hazy"
+    return "normal"
+
+# ------------------------------------------------------------------------------
+# IMPROVED WHITE BALANCE (FIXED)
+# ------------------------------------------------------------------------------
+
+def white_balance_underwater(img_bgr):
+    img = img_bgr.astype(np.float32)
+    b, g, r = cv2.split(img)
+
+    mean_rg = (np.mean(r) + np.mean(g)) / 2.0
+    gain_r = 1 + 0.5 * (mean_rg - np.mean(r)) / (mean_rg + 1e-6)
+
+    r = np.clip(r * gain_r, 0, 255)
+
+    return cv2.merge([b, g, r]).astype(np.uint8)
+
+# ------------------------------------------------------------------------------
+# SAFE CLAHE
+# ------------------------------------------------------------------------------
+
+def clahe_enhance(img_bgr):
+    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
     L, A, B = cv2.split(lab)
-    A = A.astype(np.float32)
-    B = B.astype(np.float32)
-    A = A - (np.mean(A) - 128) + A_SHIFT
-    B = B - (np.mean(B) - 128) + B_SHIFT
-    A = np.clip(A, 0, 255).astype(np.uint8)
-    B = np.clip(B, 0, 255).astype(np.uint8)
+
+    clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=(8, 8))
+    L = clahe.apply(L)
+
     return cv2.cvtColor(cv2.merge([L, A, B]), cv2.COLOR_LAB2BGR)
 
-def restore_red(img):
-    b, g, r = cv2.split(img)
-    boost = cv2.equalizeHist(r)
-    strength = RED_STRENGTH / 100.0
-    r_new = cv2.addWeighted(r, 1 - strength, boost, strength, 0)
-    return cv2.merge([b, g, r_new])
+# ------------------------------------------------------------------------------
+# SATURATION CONTROL
+# ------------------------------------------------------------------------------
 
-def clahe_enhance(img):
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    L, A, B = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=max(CLAHE_CLIP, 0.1))
-    L2 = clahe.apply(L)
-    return cv2.cvtColor(cv2.merge([L2, A, B]), cv2.COLOR_LAB2BGR)
+def saturation_clamp(img_bgr):
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+    sat = hsv[:, :, 1] / 255.0
+    sat = np.where(sat > MAX_SATURATION, MAX_SATURATION, sat)
+
+    hsv[:, :, 1] = sat * 255.0
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+# ------------------------------------------------------------------------------
+# DEHAZE (STABLE)
+# ------------------------------------------------------------------------------
 
 def dehaze(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
     A = np.percentile(gray, 95)
-    t = 1 - OMEGA * (gray / A)
-    t = np.clip(t, T_MIN, 1.0)
+
+    t = 1 - 0.75 * (gray / (A + 1e-6))
+    t = np.clip(t, 0.4, 1.0)
+
     t = cv2.merge([t, t, t])
     J = (img.astype(np.float32) - A) / t + A
+
     return np.clip(J, 0, 255).astype(np.uint8)
 
-def sharpen(img):
-    blur = cv2.GaussianBlur(img, (3, 3), 0)
-    return cv2.addWeighted(img, 1.2, blur, -0.2, 0)
+# ------------------------------------------------------------------------------
+# SHARPEN (CONTROLLED)
+# ------------------------------------------------------------------------------
 
-def gamma_correct(img, g=1.1):
-    inv = 1.0 / g
+def sharpen(img):
+    blur = cv2.GaussianBlur(img, (5, 5), 1.0)
+    return cv2.addWeighted(img, 1 + SHARPEN_AMOUNT, blur, -SHARPEN_AMOUNT, 0)
+
+# ------------------------------------------------------------------------------
+# GAMMA
+# ------------------------------------------------------------------------------
+
+def gamma_correct(img, gamma=1.08):
+    inv = 1.0 / gamma
     table = np.array([(i / 255.0) ** inv * 255 for i in range(256)]).astype("uint8")
     return cv2.LUT(img, table)
 
-def enhance_opencv(pil_img):
-    """Pure classical optics pipeline (No AI). Returns PIL RGB."""
-    img_bgr = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
-    
-    img = white_balance(img_bgr)
-    img = restore_red(img)
-    img = clahe_enhance(img)
-    img = dehaze(img)
-    img = sharpen(img)
-    img = gamma_correct(img)
-    
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(img_rgb)
+# ------------------------------------------------------------------------------
+# CLASSICAL PIPELINE (CONDITIONAL)
+# ------------------------------------------------------------------------------
 
+def enhance_opencv_adaptive(pil_img):
+    img = np.array(pil_img.convert("RGB"))
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    scene = classify_scene(img)
+
+    if scene == "hazy":
+        logger.info("Applying full preprocessing")
+        img_bgr = white_balance_underwater(img_bgr)
+        img_bgr = clahe_enhance(img_bgr)
+        img_bgr = dehaze(img_bgr)
+    else:
+        logger.info("Light preprocessing only")
+        img_bgr = white_balance_underwater(img_bgr)
+
+    img_bgr = saturation_clamp(img_bgr)
+    img_bgr = sharpen(img_bgr)
+    img_bgr = gamma_correct(img_bgr)
+
+    return Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+
+# ------------------------------------------------------------------------------
+# BACKSCATTER (UNCHANGED BUT STABLE)
+# ------------------------------------------------------------------------------
+
+def suppress_backscatter(img_rgb_np):
+    img = img_rgb_np.astype(np.float32) / 255.0
+
+    A = np.percentile(img, 99, axis=(0, 1))
+    t = 1 - 0.85 * (img / (A + 1e-6))
+    t = np.clip(t, 0.2, 1.0)
+
+    J = (img - A) / t + A
+    return np.clip(J * 255, 0, 255).astype(np.uint8)
+
+# ------------------------------------------------------------------------------
+# DEPTH-AWARE CONTRAST (FIXED)
+# ------------------------------------------------------------------------------
+
+def depth_aware_contrast(img, depth):
+    img_f = img.astype(np.float32)
+
+    d = (depth - depth.min()) / (depth.max() - depth.min() + 1e-6)
+    far = 1.0 - d
+
+    far = cv2.GaussianBlur(far, (21, 21), 0)
+    far = far[:, :, None]
+
+    alpha = DEPTH_ALPHA_BASE + DEPTH_ALPHA_SCALE * far
+    beta = DEPTH_BETA_BASE + DEPTH_BETA_SCALE * far
+
+    return np.clip(img_f * alpha + beta, 0, 255).astype(np.uint8)
+
+# ------------------------------------------------------------------------------
+# ADAPTIVE BLENDING (NEW 🔥)
+# ------------------------------------------------------------------------------
+
+def adaptive_blend(orig, pred):
+    """
+    Simple heuristic alpha map:
+    More blending in low-contrast regions
+    """
+    gray = cv2.cvtColor(orig, cv2.COLOR_RGB2GRAY)
+    contrast = cv2.Laplacian(gray, cv2.CV_32F)
+
+    alpha = cv2.normalize(np.abs(contrast), None, 0, 1, cv2.NORM_MINMAX)
+    alpha = cv2.GaussianBlur(alpha, (15, 15), 0)
+
+    alpha = alpha[:, :, None]
+
+    return (alpha * pred + (1 - alpha) * orig).astype(np.uint8)
+
+# ------------------------------------------------------------------------------
+# MAIN PIPELINE
+# ------------------------------------------------------------------------------
 
 def enhance_image(model, pil_img, use_hybrid=True):
-    """
-    Hybrid Pipeline: If use_hybrid=True (default), it passes the image through the 
-    6-stage OpenCV optics script FIRST to crush haze and restore reds, then passes 
-    that optically-perfect image into the ResNet34 UNet for topological sharpening.
-    """
-    # 1. OPTIONAL: Optically pre-process raw image using the physics pipeline
+
+    # STEP 1: Adaptive preprocessing (FIXED major flaw)
     if use_hybrid:
-        img = enhance_opencv(pil_img)
+        img = enhance_opencv_adaptive(pil_img)
     else:
         img = pil_img.convert("RGB")
 
-    orig_w, orig_h = img.size
-    img_np = np.array(img)
+    orig_np = np.array(img)
 
-    img_tensor = _to_tensor(img_np).unsqueeze(0).to(config.DEVICE)
-
-    pad_h = (32 - orig_h % 32) % 32
-    pad_w = (32 - orig_w % 32) % 32
-
-    if pad_h > 0 or pad_w > 0:
-        img_tensor = torch.nn.functional.pad(img_tensor, (0, pad_w, 0, pad_h), mode="reflect")
+    # STEP 2: MODEL
+    tensor = _to_tensor(orig_np).unsqueeze(0).to(config.DEVICE)
 
     with torch.no_grad():
-        pred = model(img_tensor)
+        pred = model(tensor)
 
-    alpha = float(getattr(config, "BLEND_ALPHA", 0.85))
-    out_tensor = alpha * pred + (1 - alpha) * img_tensor
+    pred = torch.clamp(pred, 0, 1)[0].cpu().permute(1, 2, 0).numpy()
+    pred = (pred * 255).astype(np.uint8)
 
-    out_tensor = out_tensor[0, :, :orig_h, :orig_w]
-    out_tensor = torch.clamp(out_tensor, 0, 1)
+    # STEP 3: ADAPTIVE BLENDING (NEW)
+    out = adaptive_blend(orig_np, pred)
 
-    out_np = out_tensor.cpu().permute(1, 2, 0).numpy()
-    out_np = (out_np * 255).astype(np.uint8)
+    # STEP 4: BACKSCATTER
+    out = suppress_backscatter(out)
 
-    # UNet output denoising + slight CLAHE
-    out_np = cv2.bilateralFilter(out_np, d=9, sigmaColor=75, sigmaSpace=75)
-    out_np = apply_clahe_lab(out_np, clip_limit=1.5)
+    # STEP 5: DEPTH-AWARE
+    try:
+        depth = estimate_depth_tensor(out)
+        out = depth_aware_contrast(out, depth)
+    except Exception:
+        logger.warning("Depth unavailable — fallback used")
+        out = cv2.convertScaleAbs(out, alpha=1.03, beta=6)
 
-    return Image.fromarray(out_np)
+    # STEP 6: FINAL POLISH
+    out = cv2.bilateralFilter(out, 5, 35, 35)
 
+    lab = cv2.cvtColor(out, cv2.COLOR_RGB2LAB).astype(np.float32)
+    lab[:, :, 1] = np.clip(lab[:, :, 1], 110, 150)
+    lab[:, :, 2] = np.clip(lab[:, :, 2], 110, 150)
+
+    out = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+
+    return Image.fromarray(out)
+
+# ------------------------------------------------------------------------------
+# METRICS
+# ------------------------------------------------------------------------------
 
 def calculate_metrics_full(original, enhanced):
+    return compute_all_metrics(
+        np.array(original.convert("RGB")),
+        np.array(enhanced.convert("RGB"))
+    )
 
-    orig_np = np.array(original.convert("RGB"), dtype=np.uint8)
 
-    enh_np = np.array(enhanced.convert("RGB"), dtype=np.uint8)
-
-    return compute_all_metrics(orig_np, enh_np)
+# Backward-compat alias — api.py imports this name
+enhance_opencv = enhance_opencv_adaptive

@@ -7,7 +7,6 @@
  *   • caustic blobs + cursor ripples canvas
  *   • bubble pool canvas
  *   • creature canvas (fish, jellyfish, manta, shark, school, octopus)
- *   • sonar radar canvas (when results are shown)
  *
  * All canvases share a single rAF tick.  No setInterval anywhere.
  * ─────────────────────────────────────────────────────────────────────────────
@@ -514,75 +513,6 @@ export function initAnimation() {
   }
 
   /* ═══════════════════════════════════════════════════════════
-     RADAR  (continuous animated sweep — detections are stored)
-  ═══════════════════════════════════════════════════════════ */
-  let _radarDetections = [];
-  const RADAR_COLS = {
-    'Security Threat': '#ff5555',
-    'Marine Life':     '#55cc88',
-    'Surface Vessel':  '#f0c040',
-    'Object':          '#4fc3f7',
-  };
-
-  // Called by ui.js after detections arrive
-  window._setRadarDetections = (dets) => { _radarDetections = dets || []; };
-
-  function tickRadar(now) {
-    const canvas = document.getElementById('radarCanvas');
-    if (!canvas || canvas.offsetParent === null) return; // skip if hidden
-    const ctx = canvas.getContext('2d');
-    const W = canvas.width, H = canvas.height, cx = W / 2, cy = H / 2, R = W / 2 - 10;
-
-    ctx.clearRect(0, 0, W, H);
-
-    const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
-    bg.addColorStop(0, 'rgba(0,30,50,.96)'); bg.addColorStop(1, 'rgba(0,10,20,.99)');
-    ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
-
-    [0.25, 0.5, 0.75, 1].forEach(f => {
-      ctx.beginPath(); ctx.arc(cx, cy, R * f, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(0,200,255,.12)'; ctx.lineWidth = 1; ctx.stroke();
-    });
-    ctx.strokeStyle = 'rgba(0,200,255,.12)'; ctx.lineWidth = 1;
-    [[cx, cy - R, cx, cy + R], [cx - R, cy, cx + R, cy]].forEach(([x1, y1, x2, y2]) => {
-      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-    });
-    [['N', cx - 4, cy - R + 13], ['S', cx - 4, cy + R - 4], ['W', cx - R + 3, cy + 4], ['E', cx + R - 12, cy + 4]].forEach(([l, x, y]) => {
-      ctx.fillStyle = 'rgba(0,200,255,.35)'; ctx.font = '10px Syne'; ctx.fillText(l, x, y);
-    });
-
-    // Animated sweep
-    const ang = (now / 3000) % (Math.PI * 2);
-    ctx.save(); ctx.translate(cx, cy); ctx.rotate(ang);
-    const sg = ctx.createLinearGradient(0, 0, R, 0);
-    sg.addColorStop(0, 'rgba(0,200,255,0)'); sg.addColorStop(1, 'rgba(0,200,255,.16)');
-    ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, R, -0.45, 0); ctx.closePath();
-    ctx.fillStyle = sg; ctx.fill(); ctx.restore();
-
-    _radarDetections.forEach(d => {
-      const bb = d.bbox || [0, 0, 640, 480];
-      const bx = (bb[0] + bb[2]) / 2 / 640, by = (bb[1] + bb[3]) / 2 / 480;
-      const angle = Math.atan2(by - 0.5, bx - 0.5);
-      const dist  = Math.min(1, Math.sqrt((bx - 0.5) ** 2 + (by - 0.5) ** 2) * 2);
-      const rx = cx + Math.cos(angle) * dist * R;
-      const ry = cy + Math.sin(angle) * dist * R;
-      const c  = RADAR_COLS[d.category] || '#4fc3f7';
-      ctx.beginPath(); ctx.arc(rx, ry, 9, 0, Math.PI * 2);
-      ctx.fillStyle = c + '2e'; ctx.fill(); // hex alpha hack
-      ctx.beginPath(); ctx.arc(rx, ry, 4, 0, Math.PI * 2);
-      ctx.fillStyle = c; ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,.65)'; ctx.font = '9px DM Sans';
-      ctx.fillText(d.display_class || d.class, rx + 6, ry + 3);
-    });
-
-    if (!_radarDetections.length) {
-      ctx.fillStyle = 'rgba(0,200,255,.3)'; ctx.font = '12px DM Sans';
-      ctx.textAlign = 'center'; ctx.fillText('No objects detected', cx, cy + 4);
-      ctx.textAlign = 'left';
-    }
-  }
-
-  /* ═══════════════════════════════════════════════════════════
      MASTER rAF LOOP  — single tick drives everything
   ═══════════════════════════════════════════════════════════ */
   function tick(now) {
@@ -591,8 +521,7 @@ export function initAnimation() {
     tickCaustic(now);
     tickBubbles(now);
     tickCreatures(now);
-    tickRadar(now);
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
-}
+}

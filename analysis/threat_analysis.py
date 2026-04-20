@@ -3,58 +3,107 @@ analysis/threat_analysis.py — Maritime threat scoring from detection results.
 
 Input  : list of detection dicts (from yolo_detector.py)
 Output : threat_score (0-100), alert_level, breakdown
+
+Calibration philosophy
+-----------------------
+• Weapons, mines, torpedoes, unexploded ordnance → HIGH (25-30)
+• Unauthorized submersibles/submarines          → HIGH (20-22)
+• Hull damage, suspicious packages              → MEDIUM-HIGH (14-18)
+• Human divers: context-dependent.
+    A solo diver in open water is LOW threat (8) unless accompanied
+    by weapons or until proven hostile.  Blanket "person = threat"
+    is biologically and operationally wrong.
+• Surface vessels                               → MEDIUM (6-8)
+• Marine life (sharks, fish, etc.)              → VERY LOW (0-2)
+    Sharks are not weapons. Marine biology ≠ security threat.
 """
 from __future__ import annotations
 from typing import List, Dict, Any
 
-# Threat weights per YOLO class label
+# ── Per-class base threat weights ─────────────────────────────────────────────
+# Weight = maximum contribution per detection × confidence
+# Divers get a low default weight; they are elevated only if
+# contextually flagged (e.g., accompanied by weapons).
 THREAT_WEIGHTS: Dict[str, float] = {
-    # High-threat
-    "person":        18.0,   # diver
-    "diver":         20.0,
-    "mine":          25.0,
-    "naval_mine":    25.0,
-    "submersible":   22.0,
-    "submarine":     22.0,
-    "torpedo":       28.0,
-    "weapon":        20.0,
-    "hull_damage":   18.0,
-    # Medium-threat
-    "boat":           8.0,
-    "ship":           6.0,
-    "fishing_net":    5.0,
-    "debris":         4.0,
-    # Low-threat / marine life (ignored in scoring)
-    "fish":           0.5,
-    "shark":          1.0,
-    "jellyfish":      0.2,
-    "coral":          0.0,
+    # ─── Confirmed high-threat hardware ─────────────────────────────────────
+    "torpedo":           30.0,
+    "mine":              28.0,
+    "naval mine":        28.0,
+    "naval_mine":        28.0,
+    "weapon":            22.0,
+    "knife":             15.0,
+    "explosive":         28.0,
+    # ─── Unauthorized vessels / platforms ───────────────────────────────────
+    "submarine":         22.0,
+    "submersible":       22.0,
+    # ─── Infrastructure / equipment anomalies ───────────────────────────────
+    "hull damage":       16.0,
+    "hull_damage":       16.0,
+    "suspicious package":16.0,
+    "package":           10.0,
+    # ─── Human presence — low default; context escalates ────────────────────
+    # A diver at a recreational dive site ≠ security threat.
+    # Operators should escalate manually if context warrants.
+    "person":             8.0,
+    "diver":              8.0,
+    "scuba diver":        8.0,
+    "human":              8.0,
+    # ─── Surface traffic ─────────────────────────────────────────────────────
+    "boat":               8.0,
+    "ship":               6.0,
+    "vessel":             6.0,
+    # ─── Debris / entanglement hazards ───────────────────────────────────────
+    "fishing net":        4.0,
+    "fishing_net":        4.0,
+    "debris":             3.0,
+    "sharp debris":       5.0,
+    "equipment":          2.0,
+    # ─── Marine life — NOT a security threat ─────────────────────────────────
+    "fish":               0.3,
+    "shark":              1.5,   # mild flag — operator curiosity, not danger
+    "whale":              0.2,
+    "dolphin":            0.1,
+    "jellyfish":          0.1,
+    "coral":              0.0,
+    "turtle":             0.0,
+    "sea turtle":         0.0,
+    "ray":                0.1,
+    "marine life":        0.2,
+    "marine animal":      0.2,
+    "rock":               0.0,
+    "plant":              0.0,
 }
 
+# Divers reclassified as Security Threat ONLY when a weapon is co-detected
 SECURITY_CLASSES = {
-    "person", "diver", "mine", "naval_mine", "submersible",
-    "submarine", "torpedo", "weapon", "hull_damage",
+    "mine", "naval mine", "naval_mine", "submersible",
+    "submarine", "torpedo", "weapon", "hull_damage", "hull damage",
+    "explosive", "suspicious package",
 }
+
+# Diver is contextually flagged (Yellow at most alone)
+DIVER_CLASSES = {"person", "diver", "scuba diver", "human"}
 
 MARINE_LIFE_CLASSES = {
     "fish", "shark", "whale", "dolphin", "jellyfish",
-    "coral", "sea_turtle", "ray",
+    "coral", "sea_turtle", "sea turtle", "turtle", "ray",
+    "marine life", "marine animal",
 }
 
 
 def _category(label: str) -> str:
-    if label in SECURITY_CLASSES:
+    lbl = label.lower()
+    if lbl in SECURITY_CLASSES:
         return "Security Threat"
-    if label in MARINE_LIFE_CLASSES:
+    if lbl in DIVER_CLASSES:
+        return "Diver"          # separate from blanket "Security Threat"
+    if lbl in MARINE_LIFE_CLASSES:
         return "Marine Life"
     return "Object"
 
 
 def _proximity_factor(bbox: List[float], img_w: int = 640, img_h: int = 480) -> float:
-    """
-    Proximity score: 0 (far/small) to 1 (large/centred).
-    Computed from bounding box area relative to image area.
-    """
+    """Proximity score 0-1 based on bounding-box area vs image area."""
     if len(bbox) < 4:
         return 0.0
     x1, y1, x2, y2 = bbox[:4]
@@ -64,8 +113,8 @@ def _proximity_factor(bbox: List[float], img_w: int = 640, img_h: int = 480) -> 
 
 
 def _visibility_penalty(turbidity_index: float) -> float:
-    """Low visibility = harder to respond = higher threat."""
-    return turbidity_index * 15.0
+    """Low visibility amplifies operational risk (max +10, down from +15)."""
+    return turbidity_index * 10.0
 
 
 def compute_threat_score(
@@ -75,81 +124,91 @@ def compute_threat_score(
     img_h: int = 480,
 ) -> Dict[str, Any]:
     """
-    Compute a threat score from YOLO detections and water conditions.
+    Compute a calibrated maritime threat score.
 
-    Parameters
-    ----------
-    detections      : list of dicts with keys: class, confidence, bbox, category
-    turbidity_index : from water_quality module (0..1)
-    img_w, img_h    : image dimensions for proximity calculation
-
-    Returns
-    -------
-    dict:
-        threat_score      : float 0-100
-        alert_level       : "Green" | "Yellow" | "Red"
-        security_objects  : int — number of threat-class detections
-        breakdown         : dict with sub-scores
-        recommendations   : list of action strings
+    Logic:
+    1. Base score = sum(weight[class] × confidence) for each detection
+    2. Diver escalation: if a diver AND a weapon are co-detected,
+       the diver's weight is doubled (armed diver scenario).
+    3. Proximity bonus for nearest confirmed threat.
+    4. Visibility penalty for low-light/turbid water.
+    5. Marine life NEVER triggers Yellow or Red on its own.
     """
     if not detections:
-        raw_score = 0.0
-        security_count = 0
-        prox_score = 0.0
-    else:
-        security_objects = [d for d in detections if d.get("category") == "Security Threat"]
-        security_count   = len(security_objects)
+        return {
+            "threat_score":    0.0,
+            "alert_level":     "Green",
+            "security_objects": 0,
+            "breakdown": {"detection_score": 0, "proximity_bonus": 0, "visibility_penalty": 0},
+            "recommendations": ["Continue routine monitoring."],
+        }
 
-        # Base score from detection weights × confidence
-        base = 0.0
-        for d in detections:
-            label = str(d.get("class", "")).lower()
-            conf  = float(d.get("confidence", 0.5))
-            w     = THREAT_WEIGHTS.get(label, 2.0)
-            base += w * conf
+    # Check for weapon presence (armed diver escalation)
+    has_weapon = any(
+        str(d.get("class", "")).lower() in {"weapon", "knife", "torpedo", "explosive"}
+        for d in detections
+    )
 
-        # Proximity bonus for closest/largest threat object
-        prox_scores = [
-            _proximity_factor(d.get("bbox", []), img_w, img_h) * 15.0
-            for d in security_objects
-        ]
-        prox_score = max(prox_scores) if prox_scores else 0.0
+    security_objects = [d for d in detections
+                        if d.get("category") in {"Security Threat"}]
+    security_count = len(security_objects)
 
-        # Visibility penalty
-        vis_penalty = _visibility_penalty(turbidity_index)
+    base = 0.0
+    for d in detections:
+        label = str(d.get("class", "")).lower()
+        conf  = float(d.get("confidence", 0.5))
+        w     = THREAT_WEIGHTS.get(label, 1.5)
 
-        raw_score = base + prox_score + vis_penalty
+        # Armed-diver escalation
+        if label in {"person", "diver", "scuba diver", "human"} and has_weapon:
+            w *= 2.0
 
-    # Clamp to 0-100
+        base += w * conf
+
+    # Proximity bonus — only for confirmed high-threat hardware (not divers alone)
+    hw_threats = [d for d in detections
+                  if str(d.get("class", "")).lower() in SECURITY_CLASSES]
+    prox_scores = [
+        _proximity_factor(d.get("bbox", []), img_w, img_h) * 12.0
+        for d in hw_threats
+    ]
+    prox_score = max(prox_scores) if prox_scores else 0.0
+
+    vis_penalty = _visibility_penalty(turbidity_index)
+    raw_score   = base + prox_score + vis_penalty
     threat_score = round(min(100.0, max(0.0, raw_score)), 1)
 
-    if threat_score < 25:
+    # ── Alert level ───────────────────────────────────────────────────────────
+    # Green  <20  : routine marine activity, lone diver, pure marine life
+    # Yellow 20-55: unverified vessel, lone diver, minor debris
+    # Red    >55  : weapons, mines, armed divers, unauthorized subs
+    if threat_score < 20:
         alert_level = "Green"
         recommendations = ["Continue routine monitoring."]
-    elif threat_score < 60:
+    elif threat_score < 55:
         alert_level = "Yellow"
         recommendations = [
             "Increase sensor sweep frequency.",
             "Alert duty officer.",
-            "Prepare rapid-response team.",
+            "Prepare rapid-response team on standby.",
         ]
     else:
         alert_level = "Red"
         recommendations = [
-            "Immediate threat detected — activate security protocol.",
-            "Dispatch response team.",
-            "Notify command centre.",
-            "Log all detections with timestamps.",
+            "Confirmed high-priority threat — activate security protocol.",
+            "Dispatch response team immediately.",
+            "Notify command centre and log all detections.",
+            "Do not approach without protective detail.",
         ]
 
     return {
         "threat_score":     threat_score,
         "alert_level":      alert_level,
-        "security_objects": security_count if detections else 0,
+        "security_objects": security_count,
         "breakdown": {
-            "detection_score":   round(raw_score - (prox_score if detections else 0) - _visibility_penalty(turbidity_index), 2),
-            "proximity_bonus":   round(prox_score if detections else 0, 2),
-            "visibility_penalty":round(_visibility_penalty(turbidity_index), 2),
+            "detection_score":    round(base, 2),
+            "proximity_bonus":    round(prox_score, 2),
+            "visibility_penalty": round(vis_penalty, 2),
         },
         "recommendations": recommendations,
     }
