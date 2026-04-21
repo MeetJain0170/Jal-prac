@@ -18,8 +18,14 @@ There’s also a **web UI** so you can drag-and-drop and slide before/after. No 
 ## ⚡ Quick start
 
 ```bash
+git lfs install
+git lfs pull
 pip install -r requirements.txt
 ```
+
+`git lfs pull` is required in this repo because large model/checkpoint files are
+stored via Git LFS (for example `data/JalDrishti/*` and
+`outputs/checkpoints/*`).
 
 Folders you’ll care about (they pop up when needed):
 
@@ -62,7 +68,7 @@ python inference.py input.jpg output.jpg
 **Fire up the web UI:**
 
 ```bash
-& "C:\Users\meetj\Documents\Career\Projects\NeuroSearch\.venv\Scripts\python.exe" api.py                               
+python api.py
 ```
 
 Then open **http://localhost:5500** and upload something. Drag, drop, compare. 🎨
@@ -106,6 +112,9 @@ We log **PSNR** (dB) and **SSIM** (0–1) so you can flex in the report.
 - Trained on a **limited UIEB subset**, so it’s good but not magic on every ocean on Earth.
 - Default training is CPU; long runs can be slow. Drop `NUM_EPOCHS` in `config.py` for quick experiments.
 - Goal here is **clarity and explainability** for viva/review, not to outdo every SOTA paper. Still looks great on a slide. 📊
+- First run may still download some third-party runtime weights (for example
+  torch hub caches such as MiDaS dependencies) if they are not present on the
+  user machine.
 
 ---
 
