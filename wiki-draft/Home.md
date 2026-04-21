@@ -4,11 +4,11 @@
 JalDrishti - Underwater Image Enhancement and Marine Detection System
 
 ## Team Members
-- Name: `<ADD_NAME>` | Roll No: `<ADD_ROLL_NO>` | GitHub: `<ADD_GITHUB_LINK>`
-- Name: `<ADD_NAME>` | Roll No: `<ADD_ROLL_NO>` | GitHub: `<ADD_GITHUB_LINK>`
+- Name: Jiya Singh | Roll No: 2309397 | GitHub: [JiyaSingh18](https://github.com/JiyaSingh18)
+- Name: Meet Jain | Roll No: 2309 | GitHub: [MeetJain0170](https://github.com/MeetJain0170)
 
 ## Guide / Faculty Name
-`<ADD_GUIDE_NAME>`
+Yogesh Jadhav
 
 ## Project Domain
 AI + Computer Vision + Web Application
