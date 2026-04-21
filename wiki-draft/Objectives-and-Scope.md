@@ -1,24 +1,38 @@
 # Objectives and Scope
 
 ## Project Objectives
-- Restore underwater images to improve visibility and color balance.
-- Detect divers and marine entities with reduced false positives.
-- Provide a reproducible inference pipeline for demonstration and testing.
-- Expose outputs through an interactive web interface.
+- Build an end-to-end underwater visual intelligence pipeline.
+- Improve underwater image quality without introducing unrealistic artifacts.
+- Increase object-detection reliability by detecting on enhanced images.
+- Handle difficult scenes using fallback and scene-aware postprocessing.
+- Provide a polished demo-ready interface for technical and non-technical users.
+- Maintain reproducibility through clear setup and model-management workflow.
 
 ## Scope of the Project
-- Single-image enhancement and analysis.
-- Marine-object and diver detection from enhanced inputs.
-- Depth and environmental cues from uploaded underwater frames.
-- Local deployment on CPU/GPU environments.
+### In Scope
+- Single-image underwater enhancement
+- Marine and diver detection
+- Postprocessing and label cleanup
+- Depth-map generation
+- Water/environment metric estimation
+- Local web deployment with integrated UI panels
+
+### Out of Scope
+- Real-time live-stream deployment at scale
+- Underwater video temporal tracking (full MOT pipeline)
+- Sonar/LiDAR multi-sensor fusion
+- Cloud-native distributed training infrastructure
 
 ## Applications / Use Cases
-- Marine habitat observation.
-- Educational and research demonstrations.
-- Underwater safety monitoring support.
-- Preprocessing for downstream marine analytics.
+- Marine biodiversity and habitat observation support
+- Diver presence detection and scene triage
+- Educational marine AI demonstrations
+- Underwater image preprocessing for downstream analytics
+- Maritime visual reconnaissance prototyping
 
 ## Expected Outcomes
-- Better visual clarity than raw underwater input.
-- More consistent marine/dive detections than baseline setup.
-- Structured output for report-ready screenshots and metrics.
+- Noticeable quality improvement on raw underwater images
+- Higher practical detection quality than naive baseline
+- Cleaner overlays with reduced false positives
+- Structured output combining visual and numeric indicators
+- A complete report-ready system with reproducible setup

@@ -13,7 +13,13 @@ Example sections to include in the diagram:
 - Web UI Output Panel
 
 ## Architecture Explanation
-The system takes a user-uploaded image and processes it through enhancement and analysis modules. Detection runs on enhanced imagery, then scene-aware post-processing refines labels and suppresses noise. Results are sent to UI panels for annotation, metrics, and environmental intelligence.
+JalDrishti uses a layered architecture:
+1. **Input Layer**: user uploads image through web UI.
+2. **Enhancement Layer**: deep enhancement + OpenCV fallback/tone stabilization.
+3. **Detection Layer**: marine and diver detection on enhanced image.
+4. **Refinement Layer**: scene-aware postprocess, relabel guards, de-duplication.
+5. **Analytics Layer**: depth estimation + water/threat analysis.
+6. **Presentation Layer**: annotated image, metrics, and recommendation panels.
 
 ## Modules / Components
 - **Frontend UI (`static/`)**: upload, preview, result rendering.
@@ -22,3 +28,8 @@ The system takes a user-uploaded image and processes it through enhancement and 
 - **Detection modules (`detection/`)**: marine + diver detectors.
 - **Depth module (`depth/`)**: monocular depth estimation.
 - **Analysis modules (`analysis/`)**: threat and water indicators.
+
+## Design Highlights
+- Detection runs on enhanced imagery to improve recall.
+- Fallback logic prevents blank outputs on model/runtime failures.
+- Post-processing enforces quality constraints for practical scene consistency.

@@ -11,3 +11,4 @@
 - Performance still depends on input quality and visibility.
 - Runtime behavior may vary slightly across systems due to dependency versions.
 - Some third-party weights may download on first run if cache is absent.
+- Scene-dependent class semantics can still require manual guard tuning.

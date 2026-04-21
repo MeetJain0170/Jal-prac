@@ -12,6 +12,8 @@ pip install -r requirements.txt
 python api.py
 ```
 
+Open in browser: `http://localhost:5500`
+
 ## Code Structure (Folder Explanation)
 - `api.py`: primary Flask API and orchestration logic
 - `detection/`: marine, diver, and hybrid detector modules
@@ -32,10 +34,19 @@ def detect():
     return jsonify({"success": True, "detections": detections, "annotated_image": annotated})
 ```
 
+```python
+# Example enhancement fallback idea
+if model is None:
+    enhanced_hybrid = enhance_opencv(img)
+else:
+    enhanced_hybrid = enhance_image(model, img, use_hybrid=True)
+```
+
 ## Integration Details
 - Enhancement output is used as detection input.
 - Post-processing merges detector outputs and cleans labels.
 - UI displays enhanced image, detection overlays, depth map, and analytics.
+- LFS-managed model files are pulled during setup for reproducible behavior.
 
 ## Repository Link
 [Jal-prac Repository](https://github.com/MeetJain0170/Jal-prac)

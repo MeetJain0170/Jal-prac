@@ -1,38 +1,48 @@
-# JalDrishti Project Report Wiki
+# JalDrishti Project Wiki
+
+Welcome to the official project-report wiki for **JalDrishti**, an AI-powered underwater image enhancement and marine intelligence platform.
 
 ## Project Title
-JalDrishti - Underwater Image Enhancement and Marine Detection System
+**JalDrishti: AI-Based Underwater Image Enhancement and Detection for Maritime Intelligence**
 
 ## Team Members
-- Name: Jiya Singh | Roll No: 2309397 | GitHub: [JiyaSingh18](https://github.com/JiyaSingh18)
-- Name: Meet Jain | Roll No: 2309 | GitHub: [MeetJain0170](https://github.com/MeetJain0170)
+- **Jiya Singh** | Roll No: **2309397** | GitHub: [JiyaSingh18](https://github.com/JiyaSingh18)
+- **Meet Jain** | Roll No: **2309** | GitHub: [MeetJain0170](https://github.com/MeetJain0170)
 
 ## Guide / Faculty Name
-Yogesh Jadhav
+**Yogesh Jadhav**
 
 ## Project Domain
-AI + Computer Vision + Web Application
+- Artificial Intelligence
+- Computer Vision
+- Deep Learning
+- Full-Stack Web Deployment
 
-## Short Description
-JalDrishti is an underwater vision platform that enhances low-visibility marine images and performs object detection for divers, marine life, and environmental objects.  
-It combines deep-learning enhancement, classical OpenCV processing, depth estimation, and YOLO-based detection in a single web workflow.  
-The system is designed for practical marine monitoring, research demos, and academic project presentation.
+## Project Snapshot
+JalDrishti is built to make underwater scenes easier to understand for both humans and AI systems.  
+The platform restores low-visibility marine images, detects divers and marine entities, estimates depth, and provides environment-related analytics through a clean browser interface.  
+It combines deep-learning pipelines with practical fallback logic to remain robust across real-world underwater image conditions.
 
 ## Problem Statement
-Underwater images often suffer from low contrast, haze, color cast, and poor visibility, making marine object detection unreliable. The project addresses robust enhancement and detection under challenging underwater conditions.
+Underwater imagery is severely degraded by haze, color attenuation, low contrast, and suspended particles. These challenges reduce the reliability of object detection and scene interpretation, which impacts marine monitoring, research, and safety applications.
 
 ## Objectives
-- Improve visual quality of underwater imagery.
-- Detect marine entities and divers more reliably.
-- Provide interpretable output via a browser UI.
-- Build an end-to-end pipeline suitable for real-time demos.
+- Build a robust enhancement pipeline for underwater images.
+- Improve detection quality in difficult marine scenes.
+- Reduce false positives via scene-aware post-processing.
+- Provide clear visual and metric outputs through a user-friendly web UI.
+- Deliver a reproducible project setup for academic evaluation and demonstration.
 
 ## Key Features
-- Hybrid underwater image enhancement.
-- YOLO-based marine and diver detection.
-- Scene-aware post-processing for cleaner labels.
-- Depth estimation and water-quality analytics.
-- Single-image analysis UI with visual outputs.
+- Hybrid enhancement (deep model + OpenCV fallback stabilization)
+- YOLO-based marine and diver detection
+- Scene-aware detection refinement and relabeling
+- MiDaS-based monocular depth estimation
+- Water and environmental intelligence panel
+- End-to-end image analysis in one UI workflow
+
+## Repository
+- Main project: [MeetJain0170/Jal](https://github.com/MeetJain0170/Jal)
 
 ## Wiki Navigation
 - [Introduction](Introduction)
