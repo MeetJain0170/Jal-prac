@@ -15,7 +15,7 @@ runs/
 
 # Ultralytics caches / outputs
 *.engine
-*.onnx
+
 *.torchscript
 *.tflite
 *.mlpackage
