@@ -87,15 +87,23 @@ function updateSessionStats(data) {
 
 function applyEnhance(file, data) {
   setPipe('enhance', data.success ? 'done' : 'error');
-  if (!data.success) return;
-
   // Null-safe src setters — elements may not exist if layout changed
   const setSrc = (id, src) => { const e = $(id); if (e && src) e.src = src; };
+  const originalSrc = URL.createObjectURL(file);
 
-  setSrc('imgOriginal',      URL.createObjectURL(file));
-  setSrc('imgEnhancedHybrid', data.enhanced_image_hybrid);
-  setSrc('imgEnhancedOpencv', data.enhanced_image_opencv);  // may be absent (layout v2)
-  setSrc('imgOpencvFull',     data.enhanced_image_opencv);  // full-res panel in Row 2
+  // Always show input image as baseline so panel is never blank.
+  setSrc('imgOriginal', originalSrc);
+  if (!data.success) {
+    setSrc('imgEnhancedHybrid', originalSrc);
+    setSrc('imgEnhancedOpencv', originalSrc);
+    setSrc('imgOpencvFull', originalSrc);
+    setText('procTime', 'Enhancement unavailable');
+    return;
+  }
+
+  setSrc('imgEnhancedHybrid', data.enhanced_image_hybrid || originalSrc);
+  setSrc('imgEnhancedOpencv', data.enhanced_image_opencv || originalSrc);  // may be absent (layout v2)
+  setSrc('imgOpencvFull', data.enhanced_image_opencv || originalSrc);  // full-res panel in Row 2
 
   const fmt = (v, d) => (Number.isFinite(v) ? Number(v).toFixed(d) : '—');
   setText('imgSize',    data.size || '—');

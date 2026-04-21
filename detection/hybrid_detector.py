@@ -70,13 +70,243 @@ class HybridDetector:
 
         try:
             diver_dets = self.diver_detector.detect(img_np)
-            diver_dets = [d for d in diver_dets if d.get("display_class") == "Diver" or d.get("category") == "Diver"]
+            # Keep diver model as a strict diver source to avoid class bleed
+            # (e.g. fish -> shark/equipment labels from generic COCO mappings).
+            diver_dets = [
+                d for d in diver_dets
+                if (d.get("display_class") == "Diver" or d.get("category") == "Diver")
+                and float(d.get("confidence", 0.0)) >= 0.30
+            ]
             dets.extend(diver_dets)
         except Exception as e:
             logger.warning("Diver detector failed: %s", e)
 
+        dets = self._cleanup_diver_conflicts(dets)
+        dets = self._rescue_additional_diver(dets)
+        dets = self._quality_filter(dets)
         dets.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
         return dets
+
+    @staticmethod
+    def _iou(b1, b2) -> float:
+        x1 = max(b1[0], b2[0]); y1 = max(b1[1], b2[1])
+        x2 = min(b1[2], b2[2]); y2 = min(b1[3], b2[3])
+        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        a1 = max(1e-6, (b1[2] - b1[0]) * (b1[3] - b1[1]))
+        a2 = max(1e-6, (b2[2] - b2[0]) * (b2[3] - b2[1]))
+        return inter / (a1 + a2 - inter + 1e-6)
+
+    def _cleanup_diver_conflicts(self, dets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        If we have a diver detection, suppress marine/object boxes that overlap
+        heavily with the diver body to avoid "fish on diver suit" artifacts.
+        """
+        diver_boxes = [
+            d for d in dets
+            if d.get("display_class") == "Diver" or d.get("category") == "Diver"
+        ]
+        if not diver_boxes:
+            # Conservative heuristic rescue: if diver model missed, relabel one
+            # large central marine box as Diver (common underwater failure case).
+            candidate = None
+            best_area = 0.0
+            frame_w = max([float(d.get("bbox", [0, 0, 0, 0])[2]) for d in dets] + [1.0])
+            frame_h = max([float(d.get("bbox", [0, 0, 0, 0])[3]) for d in dets] + [1.0])
+            for d in dets:
+                lbl = (d.get("display_class") or "").lower()
+                if lbl not in {"fish", "eel", "marine animal", "other"}:
+                    continue
+                x1, y1, x2, y2 = d.get("bbox", [0, 0, 0, 0])
+                bw = max(0.0, x2 - x1)
+                bh = max(0.0, y2 - y1)
+                area = bw * bh
+                if area <= 0:
+                    continue
+                cx = (x1 + x2) / 2.0
+                cy = (y1 + y2) / 2.0
+                aspect = bw / max(bh, 1e-6)
+                # central, reasonably large, elongated body-like region
+                if not (0.18 <= (cx / frame_w) <= 0.82):
+                    continue
+                if aspect < 1.2:
+                    continue
+                if not (0.12 <= (cy / frame_h) <= 0.85):
+                    continue
+                if area > best_area:
+                    best_area = area
+                    candidate = d
+
+            if candidate is not None:
+                candidate["display_class"] = "Diver"
+                candidate["class"] = "diver"
+                candidate["category"] = "Diver"
+                candidate["confidence"] = max(float(candidate.get("confidence", 0.0)), 0.28)
+            return dets
+
+        cleaned: List[Dict[str, Any]] = []
+        for d in dets:
+            if d in diver_boxes:
+                cleaned.append(d)
+                continue
+
+            drop = False
+            for dv in diver_boxes:
+                db = d.get("bbox", [0, 0, 0, 0])
+                vb = dv.get("bbox", [0, 0, 0, 0])
+                ov = self._iou(db, vb)
+                # Drop marine/object fragments intersecting diver body.
+                dx1, dy1, dx2, dy2 = db
+                cx, cy = (dx1 + dx2) / 2.0, (dy1 + dy2) / 2.0
+                inside_diver = (vb[0] <= cx <= vb[2]) and (vb[1] <= cy <= vb[3])
+                is_marineish = (d.get("category") in {"Marine Life", "Object"}) or (
+                    (d.get("display_class") or "").lower() in {"fish", "eel", "other", "marine animal"}
+                )
+                if (ov > 0.18 and is_marineish) or (inside_diver and is_marineish):
+                    drop = True
+                    break
+            if not drop:
+                cleaned.append(d)
+        return cleaned
+
+    def _rescue_additional_diver(self, dets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        If only one diver is detected, promote one additional person-like box
+        that is large enough and spatially separate.
+        """
+        divers = [d for d in dets if d.get("display_class") == "Diver" or d.get("category") == "Diver"]
+        if len(divers) != 1:
+            return dets
+
+        primary = divers[0]
+        if float(primary.get("confidence", 0.0)) < 0.55:
+            return dets
+        pb = primary.get("bbox", [0, 0, 0, 0])
+        frame_w = max([float(d.get("bbox", [0, 0, 0, 0])[2]) for d in dets] + [1.0])
+        frame_h = max([float(d.get("bbox", [0, 0, 0, 0])[3]) for d in dets] + [1.0])
+        frame_area = max(1.0, frame_w * frame_h)
+
+        candidate = None
+        best_score = 0.0
+        for d in dets:
+            if d in divers:
+                continue
+            x1, y1, x2, y2 = d.get("bbox", [0, 0, 0, 0])
+            bw = max(0.0, x2 - x1)
+            bh = max(0.0, y2 - y1)
+            area = bw * bh
+            if area < 0.010 * frame_area:
+                continue
+            aspect = bw / max(bh, 1e-6)
+            if not (0.28 <= aspect <= 1.7):
+                continue
+            if self._iou(d.get("bbox", [0, 0, 0, 0]), pb) > 0.14:
+                continue
+            conf = float(d.get("confidence", 0.0))
+            if conf < 0.22:
+                continue
+            score = (area / frame_area) + 0.4 * max(conf, 0.10)
+            if score > best_score:
+                best_score = score
+                candidate = d
+
+        if candidate is not None:
+            candidate["display_class"] = "Diver"
+            candidate["class"] = "diver"
+            candidate["category"] = "Diver"
+            candidate["confidence"] = max(float(candidate.get("confidence", 0.0)), 0.24)
+        return dets
+
+    def _quality_filter(self, dets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Keep only high-confidence, non-noisy detections for cleaner overlays.
+        """
+        if not dets:
+            return dets
+
+        diver = [d for d in dets if d.get("display_class") == "Diver" or d.get("category") == "Diver"]
+        others = [d for d in dets if d not in diver]
+        frame_w = max([float(d.get("bbox", [0, 0, 0, 0])[2]) for d in dets] + [1.0])
+        frame_h = max([float(d.get("bbox", [0, 0, 0, 0])[3]) for d in dets] + [1.0])
+        frame_area = max(1.0, frame_w * frame_h)
+
+        # Keep up to two strong, non-overlapping divers.
+        if diver:
+            diver.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
+            keep: List[Dict[str, Any]] = []
+            for d in diver:
+                conf = float(d.get("confidence", 0.0))
+                if conf < 0.16:
+                    continue
+                db = d.get("bbox", [0, 0, 0, 0])
+                x1, y1, x2, y2 = db
+                bw = max(0.0, x2 - x1)
+                bh = max(0.0, y2 - y1)
+                area_ratio = (bw * bh) / frame_area
+                aspect = bw / max(bh, 1e-6)
+                # Guard against statue/structure being mislabeled as a huge diver.
+                if area_ratio > 0.14 and conf < 0.65:
+                    continue
+                if aspect < 0.22 or aspect > 1.9:
+                    continue
+                if any(self._iou(db, k.get("bbox", [0, 0, 0, 0])) > 0.35 for k in keep):
+                    continue
+                keep.append(d)
+                if len(keep) >= 2:
+                    break
+            if not keep:
+                keep = [diver[0]]
+
+            # Keep more non-diver objects (especially marine life) while still
+            # suppressing tiny noise and diver-overlapping fragments.
+            marine_candidates = []
+            misc_candidates = []
+            for d in others:
+                conf = float(d.get("confidence", 0.0))
+                x1, y1, x2, y2 = d.get("bbox", [0, 0, 0, 0])
+                area = max(0.0, (x2 - x1) * (y2 - y1))
+                label = (d.get("display_class") or "").lower()
+                is_marineish = (d.get("category") == "Marine Life") or (
+                    label in {"fish", "eel", "ray", "shark", "marine animal", "animal other"}
+                )
+                min_conf = 0.04 if is_marineish else 0.14
+                min_area = 250 if is_marineish else 1800
+                if conf < min_conf:
+                    continue
+                if area < min_area:
+                    continue
+                if any(self._iou(d.get("bbox", [0, 0, 0, 0]), dv.get("bbox", [0, 0, 0, 0])) > 0.12 for dv in keep):
+                    continue
+                if is_marineish:
+                    marine_candidates.append(d)
+                else:
+                    # Keep miscellaneous objects conservative to reduce clutter.
+                    if conf >= 0.22:
+                        misc_candidates.append(d)
+            marine_candidates.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
+            misc_candidates.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
+            keep.extend(marine_candidates[:12])
+            keep.extend(misc_candidates[:3])
+            return keep
+
+        # No diver found: keep more confident detections for dense fish scenes.
+        strong = []
+        for d in dets:
+            conf = float(d.get("confidence", 0.0))
+            label = (d.get("display_class") or "").lower()
+            is_marineish = (d.get("category") == "Marine Life") or (
+                label in {"fish", "eel", "ray", "shark", "marine animal", "animal other"}
+            )
+            min_conf = 0.04 if is_marineish else 0.12
+            if conf < min_conf:
+                continue
+            x1, y1, x2, y2 = d.get("bbox", [0, 0, 0, 0])
+            area = max(0.0, (x2 - x1) * (y2 - y1))
+            min_area = 250 if is_marineish else 1800
+            if area < min_area:  # reject tiny corner noise boxes
+                continue
+            strong.append(d)
+        strong.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
+        return strong[:20] if strong else dets[:1]
 
     def detect_and_annotate(
         self,

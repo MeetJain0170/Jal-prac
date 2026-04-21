@@ -91,6 +91,8 @@ def _pick_trained_yolo_weights() -> str:
         # Expected Ultralytics output from Step 7
         os.path.join(BASE_DIR, "runs", "marine", "v1", "weights", "best.pt"),
         os.path.join(BASE_DIR, "runs", "marine", "v1", "weights", "last.pt"),
+        # Local downloaded artifacts (e.g. from Hugging Face dataset mirror)
+        os.path.join(BASE_DIR, "data", "JalDrishti", "best.pt"),
         # If user copied only the file into runs/
         os.path.join(BASE_DIR, "runs", "best.pt"),
         os.path.join(BASE_DIR, "runs", "last.pt"),
@@ -120,14 +122,14 @@ YOLO_MULTI_SCALE = False
 # pretrained model alongside the marine model and merge results.
 ENABLE_DIVER_DETECTOR = True
 DIVER_WEIGHTS         = "yolov8s.pt"
-DIVER_CONF_THRESH     = 0.25
+DIVER_CONF_THRESH     = 0.35
 DIVER_IOU_THRESH      = 0.45
 DIVER_IMG_SIZE        = 1280
 
 # ── Detection input preprocessing ─────────────────────────────────────────────
 # If True, `/api/detect` will run inference on the "classical OpenCV polish"
 # image (same resolution) instead of the raw uploaded image.
-DETECT_ON_OPENCV_POLISH = True
+DETECT_ON_OPENCV_POLISH = False
 
 # ── Depth estimation ─────────────────────────────────────────────────────────
 MIDAS_MODEL_TYPE = "MiDaS_small"

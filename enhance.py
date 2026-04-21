@@ -258,12 +258,29 @@ def enhance_image(model, pil_img, use_hybrid=True):
 
     # STEP 6: FINAL POLISH
     out = cv2.bilateralFilter(out, 5, 35, 35)
+    # Keep enhanced luminance but anchor chroma to original scene to avoid
+    # magenta/reddish drift on bright marine subjects.
+    out_lab = cv2.cvtColor(out, cv2.COLOR_RGB2LAB).astype(np.float32)
+    orig_lab = cv2.cvtColor(orig_np, cv2.COLOR_RGB2LAB).astype(np.float32)
+    out_lab[:, :, 1] = 0.70 * out_lab[:, :, 1] + 0.30 * orig_lab[:, :, 1]
+    out_lab[:, :, 2] = 0.70 * out_lab[:, :, 2] + 0.30 * orig_lab[:, :, 2]
+    out = cv2.cvtColor(np.clip(out_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
 
-    lab = cv2.cvtColor(out, cv2.COLOR_RGB2LAB).astype(np.float32)
-    lab[:, :, 1] = np.clip(lab[:, :, 1], 110, 150)
-    lab[:, :, 2] = np.clip(lab[:, :, 2], 110, 150)
+    # STEP 7: GUARDRAIL AGAINST OVER-DARK / OVER-STYLIZED OUTPUT
+    # Some checkpoints can produce cinematic but unrealistic dark-magenta casts.
+    # If that happens, softly blend toward classical OpenCV output.
+    opencv_ref = np.array(enhance_opencv_adaptive(pil_img))
+    orig_ref = np.array(pil_img.convert("RGB"))
+    mean_orig = float(np.mean(orig_ref))
+    mean_out = float(np.mean(out))
+    # brightness ratio below ~0.72 usually looks crushed on UI scenes
+    if mean_orig > 1.0 and (mean_out / mean_orig) < 0.72:
+        out = cv2.addWeighted(opencv_ref, 0.65, out, 0.35, 0)
 
-    out = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2RGB)
+    # Clamp excessive chroma shift against original to avoid purple cast
+    mean_delta = float(np.mean(np.abs(out.astype(np.float32) - orig_ref.astype(np.float32))))
+    if mean_delta > 62.0:
+        out = cv2.addWeighted(orig_ref, 0.45, out, 0.55, 0)
 
     return Image.fromarray(out)
 

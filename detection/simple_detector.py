@@ -120,17 +120,29 @@ def _preprocess(img_rgb: np.ndarray) -> np.ndarray:
 def _nms(dets: List[Dict[str, Any]], iou: float) -> List[Dict[str, Any]]:
     if not dets:
         return []
-    boxes = []
-    scores = []
+    # Class-aware NMS to avoid collapsing dense fish schools into 1-2 boxes.
+    out: List[Dict[str, Any]] = []
+    groups: Dict[str, List[Dict[str, Any]]] = {}
     for d in dets:
-        x1, y1, x2, y2 = d["bbox"]
-        boxes.append([int(x1), int(y1), max(1, int(x2 - x1)), max(1, int(y2 - y1))])
-        scores.append(float(d["confidence"]))
-    idxs = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.0, nms_threshold=iou)
-    if len(idxs) == 0:
-        return dets
-    keep = {int(i if np.isscalar(i) else i[0]) for i in idxs}
-    return [d for i, d in enumerate(dets) if i in keep]
+        key = str(d.get("display_class") or d.get("category") or "Object")
+        groups.setdefault(key, []).append(d)
+
+    for _, group in groups.items():
+        boxes = []
+        scores = []
+        for d in group:
+            x1, y1, x2, y2 = d["bbox"]
+            boxes.append([int(x1), int(y1), max(1, int(x2 - x1)), max(1, int(y2 - y1))])
+            scores.append(float(d["confidence"]))
+        idxs = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.0, nms_threshold=iou)
+        if len(idxs) == 0:
+            out.extend(group)
+            continue
+        keep = {int(i if np.isscalar(i) else i[0]) for i in idxs}
+        out.extend([d for i, d in enumerate(group) if i in keep])
+
+    out.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
+    return out
 
 
 def _pass_gate(d: Dict[str, Any], w: int, h: int) -> bool:
@@ -139,13 +151,13 @@ def _pass_gate(d: Dict[str, Any], w: int, h: int) -> bool:
     area_ratio = max(0.0, (x2 - x1) * (y2 - y1)) / max(float(w * h), 1.0)
     cat = d["category"]
     if cat == "Marine Life":
-        # Custom-trained checkpoints are often low-confidence in early epochs.
-        return conf >= 0.10 and area_ratio >= 0.001
+        # More permissive for dense schools/small fauna in wide scenes.
+        return conf >= 0.03 and area_ratio >= 0.0002
     if cat == "Diver":
         return conf >= 0.45 and area_ratio >= 0.003
     if cat == "Security Threat":
         return conf >= 0.20 and area_ratio >= 0.001
-    return conf >= 0.20 and area_ratio >= 0.001
+    return conf >= 0.15 and area_ratio >= 0.0008
 
 
 class MaritimeDetector:
@@ -210,7 +222,23 @@ class MaritimeDetector:
                 })
 
         dets = _nms(dets, self.iou_thresh)
+        raw_ranked = sorted(dets, key=lambda x: x["confidence"], reverse=True)
         dets = [d for d in dets if _pass_gate(d, w, h)]
+        # If all gates remove detections, keep multiple top marine candidates
+        # to avoid collapsing busy fish scenes to 1-2 boxes.
+        if not dets and raw_ranked:
+            marineish = []
+            for d in raw_ranked:
+                lbl = (d.get("display_class") or "").lower()
+                if d.get("category") == "Marine Life" or lbl in {"fish", "eel", "ray", "shark", "marine animal"}:
+                    if float(d.get("confidence", 0.0)) >= 0.03:
+                        marineish.append(d)
+                if len(marineish) >= 8:
+                    break
+            if marineish:
+                dets = marineish
+            elif raw_ranked[0]["confidence"] >= 0.05:
+                dets = [raw_ranked[0]]
         dets.sort(key=lambda x: x["confidence"], reverse=True)
         return dets
 
@@ -264,7 +292,7 @@ _sig: Optional[Tuple[Any, ...]] = None
 
 def get_detector(
     weights: Optional[str] = None,
-    conf_thresh: float = 0.12,
+    conf_thresh: float = 0.08,
     iou_thresh: float = 0.45,
     img_size: int = 1280,
     enhance: bool = True,

@@ -40,13 +40,11 @@ export async function enhance(file) {
 
 /**
  * POST /api/detect
- * @param {File} inferenceFile  Image used for YOLO inference (enhanced = better accuracy)
- * @param {File} [originalFile] Raw upload — boxes are drawn onto this for UI honesty
+ * @param {File} inferenceFile  Image used for YOLO inference and annotation
  */
-export async function detect(inferenceFile, originalFile) {
+export async function detect(inferenceFile) {
   const f = new FormData();
   f.append('image', inferenceFile);
-  if (originalFile) f.append('original', originalFile);
   const r = await fetch(`${BASE}/api/detect`, { method: 'POST', body: f });
   return r.json();
 }
@@ -125,14 +123,21 @@ export async function analyzeAll(file, { onEnhance, onDetect, onDepth, onWater, 
     try { if (onEnhance) onEnhance(enhanceData); } catch (e) { console.warn('[ui] onEnhance render error', e); }
 
 
-    // 2. Run detection on enhanced output (better underwater recall) while
-    //    keeping annotations on original upload for visual truthfulness.
-    //    We send the original inferenceFile so the backend can natively apply 
-    //    Classical OpenCV Polish Full Resolution (DETECT_ON_OPENCV_POLISH = True).
+    // 2. Run detection fully on enhanced output (inference + visualization).
     let inferenceFile = file;
+    if (enhanceData?.enhanced_image_hybrid) {
+      try {
+        inferenceFile = await dataUrlToFile(
+          enhanceData.enhanced_image_hybrid,
+          `enhanced_${file.name || 'input'}.png`
+        );
+      } catch (e) {
+        console.warn('[api] enhanced image conversion failed, fallback to original', e);
+      }
+    }
 
     await Promise.all([
-      wrap(detect(inferenceFile, file), onDetect),
+      wrap(detect(inferenceFile), onDetect),
       wrap(depth(file),        onDepth),
       wrap(analyzeWater(file), onWater),
     ]);

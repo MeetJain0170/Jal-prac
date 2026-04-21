@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import io
 import base64
+import os
 from PIL import Image
 import config
 
@@ -16,8 +17,15 @@ def _load_model():
     if _midas_model is not None:
         return _midas_model, _midas_transform
 
-    model = torch.hub.load("intel-isl/MiDaS", config.MIDAS_MODEL_TYPE, trust_repo=True)
-    transforms = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
+    repo_or_name = "intel-isl/MiDaS"
+    hub_kwargs = {"trust_repo": True}
+    local_repo = os.path.expanduser("~/.cache/torch/hub/intel-isl_MiDaS_master")
+    if os.path.isdir(local_repo):
+        repo_or_name = local_repo
+        hub_kwargs["source"] = "local"
+
+    model = torch.hub.load(repo_or_name, config.MIDAS_MODEL_TYPE, **hub_kwargs)
+    transforms = torch.hub.load(repo_or_name, "transforms", **hub_kwargs)
 
     transform = transforms.small_transform if "small" in config.MIDAS_MODEL_TYPE else transforms.dpt_transform
 
