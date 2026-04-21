@@ -688,10 +688,10 @@ class MaritimeDetector:
 
     def __init__(
         self,
-        weights:        str   = "yolov8x.pt",
+        weights: str = r"C:\Users\meetj\Documents\Career\Projects\JalDrishti\detect\runs\marine\v2-5\weights\best.pt",
         world_weights:  str   = "yolov8x-worldv2.pt",
-        conf_thresh:    float = 0.18,
-        iou_thresh:     float = 0.45,
+        conf_thresh:    float = 0.01,
+        iou_thresh:     float = 0.01,
         img_size:       int   = 1280,
         enhance:        bool  = True,
         tta:            bool  = True,

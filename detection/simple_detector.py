@@ -152,8 +152,8 @@ class MaritimeDetector:
     def __init__(
         self,
         weights: str,
-        conf_thresh: float = 0.12,
-        iou_thresh: float = 0.45,
+        conf_thresh: float = 0.01,
+        iou_thresh: float = 0.01,
         img_size: int = 1280,
     ):
         self.weights = weights
@@ -263,7 +263,7 @@ _sig: Optional[Tuple[Any, ...]] = None
 
 
 def get_detector(
-    weights: Optional[str] = "yolov8l-worldv2.pt",
+    weights: Optional[str] = None,
     conf_thresh: float = 0.12,
     iou_thresh: float = 0.45,
     img_size: int = 1280,
@@ -272,15 +272,14 @@ def get_detector(
     multi_scale: bool = False,
 ) -> MaritimeDetector:
     global _detector, _sig
+
     if weights is None:
-        # Prefer the Step 7 trained model if present; otherwise fall back.
-        root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        wdir = os.path.join(root, "runs", "marine", "v1", "weights")
-        best = os.path.join(wdir, "best.pt")
-        last = os.path.join(wdir, "last.pt")
-        weights = best if os.path.exists(best) else last if os.path.exists(last) else "yolov8l-worldv2.pt"
+        weights = r"C:\Users\meetj\Documents\Career\Projects\JalDrishti\detect\runs\marine\v2-5\weights\best.pt"
+
     sig = (weights, conf_thresh, iou_thresh, img_size)
+
     if _detector is None or _sig != sig:
         _detector = MaritimeDetector(weights, conf_thresh, iou_thresh, img_size)
         _sig = sig
+
     return _detector

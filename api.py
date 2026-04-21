@@ -221,6 +221,10 @@ def detect():
             if model:
                 infer_img = enhance_image(model, infer_img, use_hybrid=False)
                 infer_np = np.array(infer_img)
+        elif getattr(config, "DETECT_ON_OPENCV_POLISH", False):
+            # Classical OpenCV polish at full resolution for detection
+            polished = enhance_opencv(infer_img)
+            infer_np = np.array(polished)
 
         detector = _load_detector()
         if detector is None:

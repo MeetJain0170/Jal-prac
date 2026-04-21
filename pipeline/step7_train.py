@@ -12,9 +12,16 @@ Recommendation:
   - Move to yolov8l or yolov8x for final training
 """
 
-from ultralytics import YOLO
+from ultralytics import YOLO, settings
 import torch
 import os
+
+
+# Disable TQDM iteration bars completely to fix console log spanning
+os.environ['TQDM_DISABLE'] = '1'
+
+# Override global ultralytics settings so output doesn't bleed into Neurosearch or other projects
+settings.update({'runs_dir': os.path.abspath('.')})
 
 # ─── CONFIG ─────────────────────────────────────────────────────────────────
 DATA_YAML   = "data/marine_detection.yaml"
@@ -28,8 +35,10 @@ TRAIN_CONFIG = {
     "epochs":    100,
     "patience":  20,             # Early stopping: stop if no improvement for 20 epochs
     "imgsz":     640,
-    "batch":     16,             # Reduce to 8 if GPU OOM
-    "workers":   4,
+    "batch":     8,              # Reduce to 8 if GPU OOM
+    "workers":   8,              # Increased to speed up dataloading
+    "cache":     "ram",           # 🔥 Cache images in RAM to eliminate disk I/O bottleneck
+    "amp":       True,           # Automatic Mixed Precision for faster tensor cores
     # Ultralytics accepts int GPU index (0) or string like "0"/"0,1".
     # We default to GPU 0 when CUDA is available.
     "device":    0 if torch.cuda.is_available() else "cpu",
@@ -58,7 +67,7 @@ TRAIN_CONFIG = {
     "save_period": 10,           # Save checkpoint every 10 epochs
     "val":       True,
     "plots":     True,
-    "verbose":   True,
+    "verbose":   False,
 }
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -88,11 +97,24 @@ def train():
     else:
         print("Device: CPU")
 
-    print(f"\nLoading base model: {BASE_MODEL}")
-    model = YOLO(BASE_MODEL)
+    # Look for last.pt to gracefully resume after OOMs or crashes
+    custom_run_path = r"C:\Users\meetj\Documents\Career\Projects\JalDrishti\runs\marine\v1\weights\last.pt"
+    local_run_path = os.path.join(PROJECT_DIR, RUN_NAME, "weights", "last.pt")
 
-    print(f"\nStarting training — output: {PROJECT_DIR}/{RUN_NAME}")
-    results = model.train(**TRAIN_CONFIG)
+    last_pt = custom_run_path if os.path.exists(custom_run_path) else local_run_path
+
+    if os.path.exists(last_pt):
+        print(f"\nFound existing checkpoint: {last_pt}")
+        print("Resuming training from the last saved epoch. Memory (batch size) adjustments have been applied.")
+        model = YOLO(last_pt)
+        results = model.train(resume=True)
+    else:
+        print(f"\nLoading base model: {BASE_MODEL}")
+        model = YOLO(BASE_MODEL)
+
+        print(f"\nStarting fresh training — output: {PROJECT_DIR}/{RUN_NAME}")
+        TRAIN_CONFIG["batch"] = 8  # Safe default to prevent future OOMs
+        results = model.train(**TRAIN_CONFIG)
 
     best_path = os.path.join(PROJECT_DIR, RUN_NAME, "weights", "best.pt")
     print(f"\nTraining complete.")

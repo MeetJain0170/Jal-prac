@@ -124,6 +124,11 @@ DIVER_CONF_THRESH     = 0.25
 DIVER_IOU_THRESH      = 0.45
 DIVER_IMG_SIZE        = 1280
 
+# ── Detection input preprocessing ─────────────────────────────────────────────
+# If True, `/api/detect` will run inference on the "classical OpenCV polish"
+# image (same resolution) instead of the raw uploaded image.
+DETECT_ON_OPENCV_POLISH = True
+
 # ── Depth estimation ─────────────────────────────────────────────────────────
 MIDAS_MODEL_TYPE = "MiDaS_small"
 

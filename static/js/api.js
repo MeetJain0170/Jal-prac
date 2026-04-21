@@ -127,17 +127,9 @@ export async function analyzeAll(file, { onEnhance, onDetect, onDepth, onWater, 
 
     // 2. Run detection on enhanced output (better underwater recall) while
     //    keeping annotations on original upload for visual truthfulness.
+    //    We send the original inferenceFile so the backend can natively apply 
+    //    Classical OpenCV Polish Full Resolution (DETECT_ON_OPENCV_POLISH = True).
     let inferenceFile = file;
-    if (enhanceData?.enhanced_image_hybrid) {
-      try {
-        inferenceFile = await dataUrlToFile(
-          enhanceData.enhanced_image_hybrid,
-          `enhanced_${file.name || 'input'}.png`
-        );
-      } catch (e) {
-        console.warn('[api] enhanced image conversion failed, fallback to original', e);
-      }
-    }
 
     await Promise.all([
       wrap(detect(inferenceFile, file), onDetect),
