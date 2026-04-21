@@ -1,18 +1,16 @@
 __pycache__/
 *.pyc
-data
-# Epoch checkpoints too large; best_model.pth via Git LFS
-outputs/checkpoints/checkpoint_epoch_*.pth
 useless
-outputs
+
+# Keep generic training artifacts out of Git.
+runs/
+outputs/logs/
+outputs/results/
+outputs/videos/
+outputs/gallery/
+outputs/checkpoints/checkpoint_epoch_*.pth
 
 # ── Ultralytics / YOLO artifacts ─────────────────────────────────────────────
-# Training runs (weights, plots, results)
-runs/
-
-# Model weights (YOLO .pt files are large; keep them out of git)
-*.pt
-
 # Ultralytics caches / outputs
 *.engine
 
@@ -22,4 +20,3 @@ runs/
 
 # Dataset caches created by Ultralytics
 **/*.cache
-*.pt
