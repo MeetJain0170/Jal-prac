@@ -36,7 +36,7 @@ CORS(app)
 DETECTOR_REVISION = "detector-2026-04-21-r4"
 
 _MODEL: UNet | None = None
-_DETECTOR = None
+_DETECTOR_CACHE = {}
 _DEPTH_MODEL = None
 
 
@@ -61,15 +61,18 @@ def _load_model():
         return None
 
 
-def _load_detector():
-    global _DETECTOR
-    if _DETECTOR is not None:
-        return _DETECTOR
+def _load_detector(profile: str | None = None):
+    global _DETECTOR_CACHE
+    profile = (profile or getattr(config, "DETECTION_PROFILE", "full")).strip().lower()
+    if profile in _DETECTOR_CACHE:
+        return _DETECTOR_CACHE[profile]
 
     try:
         if getattr(config, "ENABLE_DIVER_DETECTOR", False):
             from detection.hybrid_detector import get_detector
-            _DETECTOR = get_detector(
+            use_shark = getattr(config, "ENABLE_SHARK_DETECTOR", False) and profile in {"full", "shark_focus"}
+            use_fish = getattr(config, "ENABLE_FISH_DETECTOR", False) and profile in {"full", "fish_focus"}
+            _DETECTOR_CACHE[profile] = get_detector(
                 marine_weights=config.YOLO_WEIGHTS,
                 marine_conf=config.YOLO_CONF_THRESH,
                 marine_iou=config.YOLO_IOU_THRESH,
@@ -78,10 +81,18 @@ def _load_detector():
                 diver_conf=getattr(config, "DIVER_CONF_THRESH", 0.25),
                 diver_iou=getattr(config, "DIVER_IOU_THRESH", 0.45),
                 diver_imgsz=getattr(config, "DIVER_IMG_SIZE", config.YOLO_IMG_SIZE),
+                shark_weights=getattr(config, "SHARK_WEIGHTS", None) if use_shark else None,
+                shark_conf=getattr(config, "SHARK_CONF_THRESH", 0.16),
+                shark_iou=getattr(config, "SHARK_IOU_THRESH", 0.45),
+                shark_imgsz=getattr(config, "SHARK_IMG_SIZE", config.YOLO_IMG_SIZE),
+                fish_weights=getattr(config, "FISH_WEIGHTS", None) if use_fish else None,
+                fish_conf=getattr(config, "FISH_CONF_THRESH", 0.10),
+                fish_iou=getattr(config, "FISH_IOU_THRESH", 0.45),
+                fish_imgsz=getattr(config, "FISH_IMG_SIZE", config.YOLO_IMG_SIZE),
             )
         else:
             from detection.simple_detector import get_detector
-            _DETECTOR = get_detector(
+            _DETECTOR_CACHE[profile] = get_detector(
                 weights=config.YOLO_WEIGHTS,
                 conf_thresh=config.YOLO_CONF_THRESH,
                 iou_thresh=config.YOLO_IOU_THRESH,
@@ -89,7 +100,7 @@ def _load_detector():
                 tta=getattr(config, "YOLO_TTA", False),
                 multi_scale=getattr(config, "YOLO_MULTI_SCALE", True),
             )
-        return _DETECTOR
+        return _DETECTOR_CACHE[profile]
     except Exception as e:
         logger.warning(f"YOLO load failed: {e}")
         return None
@@ -370,6 +381,7 @@ def _augment_marine_recall(detector, infer_np, detections):
     marine_now = [d for d in detections if d.get("category") == "Marine Life"]
     if len(marine_now) >= 3:
         return detections
+    diver_present = any(d.get("category") == "Diver" or d.get("display_class") == "Diver" for d in detections)
     if detector is None or not hasattr(detector, "marine_detector"):
         return detections
 
@@ -392,24 +404,32 @@ def _augment_marine_recall(detector, infer_np, detections):
         conf = float(d.get("confidence", 0.0))
         x1, y1, x2, y2 = d.get("bbox", [0, 0, 0, 0])
         area_ratio = max(0.0, (x2 - x1) * (y2 - y1)) / img_area
-        if conf < 0.03 or area_ratio < 0.00015:
+        min_conf = max(0.15, 0.18 if diver_present else 0.15)
+        min_area_ratio = 0.0015 if diver_present else 0.0008
+        if conf < min_conf or area_ratio < min_area_ratio:
+            continue
+        if area_ratio > 0.28 and conf < 0.75:
             continue
         if any(_iou_xyxy(d.get("bbox", [0, 0, 0, 0]), e.get("bbox", [0, 0, 0, 0])) > 0.55 for e in merged):
             continue
+        d = dict(d)
+        d["source"] = "api_marine_recall"
         merged.append(d)
         added += 1
-        if added >= 10:
+        if added >= (5 if diver_present else 8):
             break
     return merged
 
 
-def _augment_world_marine(infer_np, detections):
+def _augment_world_marine(infer_np, detections, *, only_when_empty: bool = True):
     """
     Secondary marine recall using YOLO-World when fish count is too low but
     the scene clearly contains marine activity.
     """
     marine_now = [d for d in detections if d.get("category") == "Marine Life"]
     if len(marine_now) >= 4:
+        return detections
+    if only_when_empty and len(marine_now) > 0:
         return detections
 
     try:
@@ -432,12 +452,16 @@ def _augment_world_marine(infer_np, detections):
             continue
         x1, y1, x2, y2 = d.get("bbox", [0, 0, 0, 0])
         area = max(0.0, (x2 - x1) * (y2 - y1))
-        if float(d.get("confidence", 0.0)) < 0.03 or area < 150:
+        area_ratio = area / max(1.0, float(infer_np.shape[0] * infer_np.shape[1]))
+        if float(d.get("confidence", 0.0)) < 0.20 or area < 900:
+            continue
+        if area_ratio > 0.30 and float(d.get("confidence", 0.0)) < 0.82:
             continue
         if any(_iou_xyxy(d.get("bbox", [0, 0, 0, 0]), e.get("bbox", [0, 0, 0, 0])) > 0.58 for e in merged):
             continue
         d = dict(d)
         d["category"] = "Marine Life"
+        d["source"] = "api_world_marine"
         if d.get("display_class") == "Animal Other":
             d["display_class"] = "Marine Animal"
         merged.append(d)
@@ -486,6 +510,8 @@ def _scene_postprocess(infer_np, detections):
         lbl = (item.get("display_class") or "").lower()
         cat = item.get("category")
         conf = float(item.get("confidence", 0.0))
+        if conf < 0.15:
+            continue
         x1, y1, x2, y2 = item.get("bbox", [0, 0, 0, 0])
         bw = max(0.0, x2 - x1)
         bh = max(0.0, y2 - y1)
@@ -506,6 +532,17 @@ def _scene_postprocess(infer_np, detections):
             item["display_class"] = "Fish"
             item["class"] = "fish"
             item["category"] = "Marine Life"
+
+        # 3b) Hard sanity: fish-like boxes should not occupy huge frame area
+        # unless confidence is very strong.
+        if item.get("category") == "Marine Life" and lbl in {"fish", "tropical fish", "marine animal", "animal other", "eel"}:
+            if area_ratio > 0.30 and conf < 0.82:
+                continue
+            # Normalize ambiguous marine labels to fish for cleaner UX.
+            if lbl in {"animal other", "marine animal", "tropical fish", "eel"}:
+                item["display_class"] = "Fish"
+                item["class"] = "fish"
+                item["category"] = "Marine Life"
 
         # 4) Promote very large marine body to Sea Turtle in diver scenes.
         if diver_present and item.get("category") == "Marine Life":
@@ -540,7 +577,33 @@ def _scene_postprocess(infer_np, detections):
 
     # Keep output readable without collapsing valid schools.
     cleaned.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
-    return cleaned[:24]
+    return cleaned[:40]
+
+
+def _strict_marine_filter(detections):
+    """
+    Keep only diver + fish/shark marine outputs in strict mode.
+    Suppresses noisy classes like Net/Underwater Structure for now.
+    """
+    out = []
+    for d in detections:
+        cls = (d.get("display_class") or "").lower().strip()
+        cat = (d.get("category") or "").strip()
+
+        if cls == "diver" or cat == "Diver":
+            out.append(d)
+            continue
+
+        if cls in {"fish", "shark", "ray", "sea turtle", "whale", "dolphin", "jellyfish", "octopus"}:
+            nd = dict(d)
+            if cls not in {"shark", "ray", "sea turtle", "whale", "dolphin", "jellyfish", "octopus"}:
+                nd["display_class"] = "Fish"
+                nd["class"] = "fish"
+            nd["category"] = "Marine Life"
+            out.append(nd)
+            continue
+
+    return out
 
 
 # ------------------------------------------------------------------------------
@@ -667,7 +730,16 @@ def detect():
             polished = enhance_opencv(infer_img)
             infer_np = np.array(polished)
 
-        detector = _load_detector()
+        detection_mode = request.form.get("mode", getattr(config, "DETECTION_MODE", "marine_clean")).strip().lower()
+        if detection_mode not in {"marine_clean", "full_debug"}:
+            detection_mode = "marine_clean"
+
+        strict_labels_only = True if detection_mode == "marine_clean" else bool(getattr(config, "STRICT_MARINE_LABELS_ONLY", True))
+        enable_world_marine = False if detection_mode == "marine_clean" else bool(getattr(config, "ENABLE_WORLD_MARINE_AUGMENT", False))
+        enable_structure_rescue = False if detection_mode == "marine_clean" else bool(getattr(config, "ENABLE_STRUCTURE_RESCUE", False))
+
+        detect_profile = request.form.get("detection_profile", getattr(config, "DETECTION_PROFILE", "full"))
+        detector = _load_detector(profile=detect_profile)
         if detector is None:
             return jsonify({"error": "YOLO unavailable"}), 200
 
@@ -710,9 +782,15 @@ def detect():
             detections, annotated = _fallback_marine_detection(infer_np, infer_np)
 
         detections = _augment_marine_recall(detector, infer_np, detections)
-        detections = _augment_world_marine(infer_np, detections)
-        detections = _rescue_underwater_structure(infer_np, detections)
+        if enable_world_marine and not _has_meaningful_detections(detections, infer_np):
+            detections = _augment_world_marine(infer_np, detections, only_when_empty=True)
+        if enable_structure_rescue:
+            detections = _rescue_underwater_structure(infer_np, detections)
         detections = _scene_postprocess(infer_np, detections)
+        if strict_labels_only:
+            detections = _strict_marine_filter(detections)
+        min_conf = float(getattr(config, "DETECTION_MIN_CONFIDENCE", 0.15))
+        detections = [d for d in detections if float(d.get("confidence", 0.0)) >= min_conf]
         try:
             from detection.hybrid_detector import _draw as _draw_hybrid
             annotated_np = _draw_hybrid(infer_np, detections)
@@ -733,6 +811,8 @@ def detect():
             "detections": detections,
             "detection_count": len(detections),
             "detector_revision": DETECTOR_REVISION,
+            "detection_mode": detection_mode,
+            "detection_profile": detect_profile,
             "annotated_image": annotated,
             "threat_score": threat["threat_score"],
             "alert_level": threat["alert_level"],
@@ -905,7 +985,7 @@ def gallery_clear():
 @app.route("/api/status")
 def status():
     model = _load_model()
-    yolo_ok = _load_detector() is not None
+    yolo_ok = _load_detector(profile=getattr(config, "DETECTION_PROFILE", "full")) is not None
     midas_ok = _load_depth() is not None
 
     return jsonify({
@@ -917,6 +997,7 @@ def status():
             "midas": midas_ok,
             "opencv": True,
         },
+        "detection_profile": getattr(config, "DETECTION_PROFILE", "full"),
     })
 
 

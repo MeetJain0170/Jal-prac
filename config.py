@@ -121,10 +121,39 @@ YOLO_MULTI_SCALE = False
 # diver detection (as the project had before the pipeline), we run a small
 # pretrained model alongside the marine model and merge results.
 ENABLE_DIVER_DETECTOR = True
-DIVER_WEIGHTS         = "yolov8s.pt"
-DIVER_CONF_THRESH     = 0.35
+DIVER_WEIGHTS         = "yolov8x.pt"
+DIVER_CONF_THRESH     = 0.30
 DIVER_IOU_THRESH      = 0.45
 DIVER_IMG_SIZE        = 1280
+
+# ── Specialist detectors (optional, togglable) ───────────────────────────────
+# These run alongside the marine + diver detectors when enabled and keep only
+# their target classes for stronger class-specific recall.
+ENABLE_SHARK_DETECTOR  = True
+SHARK_WEIGHTS          = "yolov8l.pt"
+SHARK_CONF_THRESH      = 0.15
+SHARK_IOU_THRESH       = 0.45
+SHARK_IMG_SIZE         = 1280
+
+ENABLE_FISH_DETECTOR   = True
+FISH_WEIGHTS           = "yolov8m.pt"
+FISH_CONF_THRESH       = 0.15
+FISH_IOU_THRESH        = 0.45
+FISH_IMG_SIZE          = 1280
+
+# Hard minimum confidence filter applied before final response.
+DETECTION_MIN_CONFIDENCE = 0.15
+STRICT_MARINE_LABELS_ONLY = True
+ENABLE_WORLD_MARINE_AUGMENT = False
+ENABLE_STRUCTURE_RESCUE = False
+# Runtime behavior mode for /api/detect:
+# - marine_clean: strict diver/fish/shark outputs, low noise
+# - full_debug:   keep wider labels/augmentations for debugging
+DETECTION_MODE = "marine_clean"
+
+# Active detector profile for /api/detect when request does not provide one.
+# Allowed: "base", "marine_only", "shark_focus", "fish_focus", "full"
+DETECTION_PROFILE      = "full"
 
 # ── Detection input preprocessing ─────────────────────────────────────────────
 # If True, `/api/detect` will run inference on the "classical OpenCV polish"
